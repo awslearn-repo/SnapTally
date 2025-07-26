@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SnapTally - Receipt Scanner</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>SnapTally</h1>
+        <p class="subtitle">Smart Receipt Scanner</p>
+      </header>
+
+      <section class="upload-section">
+        <label for="imageUpload" class="upload-label"
+          >Upload Receipt Image</label
+        >
+        <input type="file" id="imageUpload" accept="image/*" />
+        <button id="processBtn">Scan Receipt</button>
+      </section>
+
+      <section id="output" class="output-section">
+        <h2>Extracted Receipt Details</h2>
+        <div id="receiptInfo" class="receipt-info"></div>
+      </section>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.4/dist/tesseract.min.js"></script>
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>
