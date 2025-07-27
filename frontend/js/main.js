@@ -16,7 +16,7 @@ document.getElementById("processBtn").addEventListener("click", async () => {
 
   try {
     const response = await fetch(
-      "https://0sd1rcx0mc.execute-api.us-east-1.amazonaws.com/receipt",
+      "https://vppubumnr7.execute-api.us-east-1.amazonaws.com/prod/receipt",
       {
         method: "POST",
         body: formData,
