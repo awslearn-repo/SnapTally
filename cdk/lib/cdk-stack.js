@@ -1,6 +1,7 @@
 const { Stack, Duration } = require("aws-cdk-lib");
 const lambda = require("aws-cdk-lib/aws-lambda");
 const apigateway = require("aws-cdk-lib/aws-apigateway");
+const iam = require("aws-cdk-lib/aws-iam");
 const path = require("path");
 
 class CdkStack extends Stack {
@@ -17,7 +18,17 @@ class CdkStack extends Stack {
       runtime: lambda.Runtime.NODEJS_18_X,
       handler: "index.handler",
       code: lambda.Code.fromAsset(path.join(__dirname, "../../backend")),
+      timeout: Duration.seconds(30), // Increase timeout for image processing
     });
+
+    // 👇 Add Textract permissions to Lambda
+    receiptLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["textract:DetectDocumentText"],
+        resources: ["*"],
+      })
+    );
 
     // 👇 API Gateway with /receipt POST endpoint
     const api = new apigateway.RestApi(this, "SnapTallyAPI", {
