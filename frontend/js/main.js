@@ -1,3 +1,4 @@
+// Receipt processing using AWS Textract exclusively (no local OCR fallback)
 document.getElementById("processBtn").addEventListener("click", async () => {
   const fileInput = document.getElementById("imageUpload");
   const file = fileInput.files[0];
@@ -9,7 +10,7 @@ document.getElementById("processBtn").addEventListener("click", async () => {
 
   // Show loading state
   const output = document.getElementById("receiptInfo");
-  output.innerHTML = "<p>Processing receipt... Please wait.</p>";
+  output.innerHTML = "<p>Processing receipt with AWS Textract... Please wait.</p>";
 
   try {
     // Convert file to base64
@@ -58,98 +59,17 @@ document.getElementById("processBtn").addEventListener("click", async () => {
           }
         </ul>
       `;
-    } else if (result.message) {
-      // Fallback: Old API response or simple message - use client-side OCR
-      console.log("API returned simple message, falling back to client-side OCR");
-      await processWithTesseract(file, output);
     } else {
       output.innerHTML =
-        "<p>Could not extract receipt details. Please try another image.</p>";
+        "<p>Could not extract receipt details from AWS Textract. Please try another image or ensure the image is clear.</p>";
     }
   } catch (error) {
     console.error("Error:", error);
-    // Fallback to client-side OCR if API fails
-    console.log("API failed, falling back to client-side OCR");
-    await processWithTesseract(file, output);
+    output.innerHTML = `
+      <p>Error processing receipt with AWS Textract: ${error.message}</p>
+      <p>Please try again or check if the image is clear and properly formatted.</p>
+    `;
   }
 });
 
-// Fallback function using Tesseract.js for client-side OCR
-async function processWithTesseract(file, output) {
-  try {
-    output.innerHTML = "<p>Processing receipt with local OCR... Please wait.</p>";
-    
-    const { data: { text } } = await Tesseract.recognize(file, 'eng', {
-      logger: m => console.log(m)
-    });
-    
-    console.log('Extracted text:', text);
-    
-    // Parse the extracted text
-    const receiptData = parseReceiptText(text);
-    
-    output.innerHTML = `
-      <p><strong>Vendor:</strong> ${receiptData.vendor}</p>
-      <p><strong>Date:</strong> ${receiptData.date}</p>
-      <p><strong>Total:</strong> ${receiptData.total}</p>
-      <p><strong>Items:</strong></p>
-      <ul>
-        ${receiptData.items.map((item) => `<li>${item}</li>`).join("")}
-      </ul>
-      <p><em>Processed using local OCR</em></p>
-    `;
-  } catch (error) {
-    console.error("Tesseract error:", error);
-    output.innerHTML = "<p>Something went wrong. Please try again.</p>";
-  }
-}
 
-// Receipt text parsing function (same as backend)
-function parseReceiptText(text) {
-  const lines = text.split('\n').filter(line => line.trim());
-  
-  let vendor = null;
-  let date = null;
-  let total = null;
-  const items = [];
-
-  // Simple patterns for common receipt elements
-  const datePattern = /\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/;
-  const pricePattern = /\$?\d+\.\d{2}/g;
-  const totalPattern = /total.*?(\$?\d+\.\d{2})/i;
-
-  for (const line of lines) {
-    // Extract vendor (usually first meaningful line)
-    if (!vendor && line.length > 3 && !datePattern.test(line) && !pricePattern.test(line)) {
-      vendor = line.trim();
-    }
-
-    // Extract date
-    if (!date && datePattern.test(line)) {
-      const dateMatch = line.match(datePattern);
-      if (dateMatch) {
-        date = dateMatch[0];
-      }
-    }
-
-    // Extract total
-    if (!total && totalPattern.test(line)) {
-      const totalMatch = line.match(totalPattern);
-      if (totalMatch) {
-        total = totalMatch[1];
-      }
-    }
-
-    // Extract items (lines with prices that aren't totals)
-    if (pricePattern.test(line) && !totalPattern.test(line)) {
-      items.push(line.trim());
-    }
-  }
-
-  return {
-    vendor: vendor || "Unknown",
-    date: date || "Unknown", 
-    total: total || "Unknown",
-    items: items.length > 0 ? items : ["No items found"]
-  };
-}

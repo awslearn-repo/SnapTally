@@ -13,19 +13,26 @@ class CdkStack extends Stack {
   constructor(scope, id, props) {
     super(scope, id, props);
 
-    // 👇 Lambda function for receipt processing
+    // 👇 Lambda function for receipt processing with AWS Textract
     const receiptLambda = new lambda.Function(this, "ReceiptLambda", {
       runtime: lambda.Runtime.NODEJS_18_X,
       handler: "index.handler",
       code: lambda.Code.fromAsset(path.join(__dirname, "../../backend")),
-      timeout: Duration.seconds(30), // Increase timeout for image processing
+      timeout: Duration.seconds(30), // Timeout for AWS Textract processing
+      memorySize: 512, // Increased memory for image processing
+      environment: {
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1', // Optimize SDK v3 performance
+      },
     });
 
-    // 👇 Add Textract permissions to Lambda
+    // 👇 Add AWS Textract permissions to Lambda (exclusive OCR processing)
     receiptLambda.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["textract:DetectDocumentText"],
+        actions: [
+          "textract:DetectDocumentText",
+          "textract:AnalyzeDocument" // For future enhanced features
+        ],
         resources: ["*"],
       })
     );
