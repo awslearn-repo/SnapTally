@@ -1,7 +1,7 @@
-const AWS = require("aws-sdk");
+const { TextractClient, DetectDocumentTextCommand } = require("@aws-sdk/client-textract");
 
 // Initialize AWS Textract client
-const textract = new AWS.Textract({ region: 'us-east-1' });
+const textract = new TextractClient({ region: 'us-east-1' });
 
 exports.handler = async (event) => {
   try {
@@ -24,15 +24,16 @@ exports.handler = async (event) => {
 
     // Convert base64 to buffer
     const imageBuffer = Buffer.from(imageBase64, 'base64');
+    console.log(`Processing receipt with AWS Textract. Image size: ${imageBuffer.length} bytes`);
 
     // Use AWS Textract to extract text from the image
-    const textractParams = {
+    const command = new DetectDocumentTextCommand({
       Document: {
         Bytes: imageBuffer
       }
-    };
+    });
 
-    const textractResult = await textract.detectDocumentText(textractParams).promise();
+    const textractResult = await textract.send(command);
     
     // Extract text from Textract response
     const extractedText = textractResult.Blocks
@@ -40,6 +41,8 @@ exports.handler = async (event) => {
       .map(block => block.Text)
       .join('\n');
 
+    console.log(`AWS Textract extracted ${extractedText.length} characters of text`);
+    
     // Basic receipt parsing (this is a simple implementation)
     const receiptData = parseReceiptText(extractedText);
 
@@ -57,7 +60,18 @@ exports.handler = async (event) => {
       }),
     };
   } catch (err) {
-    console.error('Error processing receipt:', err);
+    console.error('Error processing receipt with AWS Textract:', err);
+    
+    // Provide more specific error messages
+    let errorMessage = 'Failed to process receipt with AWS Textract';
+    if (err.name === 'InvalidParameterException') {
+      errorMessage = 'Invalid image format. Please upload a clear image (JPEG or PNG).';
+    } else if (err.name === 'UnsupportedDocumentException') {
+      errorMessage = 'Unsupported document type. Please upload a receipt image.';
+    } else if (err.name === 'DocumentTooLargeException') {
+      errorMessage = 'Image file is too large. Please upload a smaller image.';
+    }
+    
     return {
       statusCode: 500,
       headers: { 
@@ -66,7 +80,10 @@ exports.handler = async (event) => {
         "Access-Control-Allow-Headers": "Content-Type",
         "Access-Control-Allow-Methods": "POST, OPTIONS"
       },
-      body: JSON.stringify({ error: err.message }),
+      body: JSON.stringify({ 
+        error: errorMessage,
+        details: err.message 
+      }),
     };
   }
 };
