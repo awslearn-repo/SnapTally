@@ -2,8 +2,8 @@
 
 # Script to update frontend API URLs with the new API Gateway endpoint
 
-FRONTEND_FILE="frontend/js/main.js"
-CDK_DIR="cdk"
+FRONTEND_FILE="../frontend/js/main.js"
+CDK_DIR="../cdk"
 
 echo "🔧 SnapTally Frontend URL Updater"
 echo "================================="
