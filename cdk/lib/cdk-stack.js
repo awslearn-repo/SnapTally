@@ -27,26 +27,17 @@ class CdkStack extends Stack {
       timeToLiveAttribute: "ttl", // Enable TTL for compliance
     });
 
-    // Add new GSI for querying by vendor (using vendorLower field)
+    // Add GSIs one at a time to avoid "Cannot perform more than one GSI creation" error
+    // Stage 1: Add VendorLowerIndex first
     receiptsTable.addGlobalSecondaryIndex({
       indexName: "VendorLowerIndex",
       partitionKey: { name: "vendorLower", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
     });
 
-    // Add new GSI for querying by category
-    receiptsTable.addGlobalSecondaryIndex({
-      indexName: "CategoryTimestampIndex", 
-      partitionKey: { name: "category", type: dynamodb.AttributeType.STRING },
-      sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
-    });
-
-    // Add GSI for querying by user (ready for Cognito integration)
-    receiptsTable.addGlobalSecondaryIndex({
-      indexName: "UserTimestampIndex",
-      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
-      sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
-    });
+    // Note: Additional GSIs will be added in subsequent deployments
+    // Stage 2: CategoryTimestampIndex (deploy separately)
+    // Stage 3: UserTimestampIndex (deploy separately)
 
     // 👇 Lambda function for API Gateway entry point
     const apiLambda = new lambda.Function(this, "ApiLambda", {
