@@ -27,17 +27,24 @@ class CdkStack extends Stack {
       timeToLiveAttribute: "ttl", // Enable TTL for compliance
     });
 
-    // Add GSI for querying by vendor
+    // Add new GSI for querying by vendor (using vendorLower field)
     receiptsTable.addGlobalSecondaryIndex({
-      indexName: "VendorIndex",
+      indexName: "VendorLowerIndex",
       partitionKey: { name: "vendorLower", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
     });
 
-    // Add GSI for querying by category
+    // Add new GSI for querying by category
     receiptsTable.addGlobalSecondaryIndex({
-      indexName: "CategoryIndex",
+      indexName: "CategoryTimestampIndex", 
       partitionKey: { name: "category", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
+    });
+
+    // Add GSI for querying by user (ready for Cognito integration)
+    receiptsTable.addGlobalSecondaryIndex({
+      indexName: "UserTimestampIndex",
+      partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
     });
 
