@@ -10,6 +10,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@aws-sdk/client-textract": "^3.478.0"
+    "@aws-sdk/client-textract": "^3.478.0",
+    "@aws-sdk/client-dynamodb": "^3.478.0",
+    "@aws-sdk/lib-dynamodb": "^3.478.0",
+    "uuid": "^9.0.1"
   }
 }
