@@ -3,6 +3,8 @@ const lambda = require("aws-cdk-lib/aws-lambda");
 const apigateway = require("aws-cdk-lib/aws-apigateway");
 const iam = require("aws-cdk-lib/aws-iam");
 const dynamodb = require("aws-cdk-lib/aws-dynamodb");
+const stepfunctions = require("aws-cdk-lib/aws-stepfunctions");
+const sfnTasks = require("aws-cdk-lib/aws-stepfunctions-tasks");
 const path = require("path");
 
 class CdkStack extends Stack {
@@ -22,56 +24,195 @@ class CdkStack extends Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: RemovalPolicy.RETAIN, // Keep data when stack is deleted
       pointInTimeRecovery: true, // Enable backup
+      timeToLiveAttribute: "ttl", // Enable TTL for compliance
     });
 
     // Add GSI for querying by vendor
     receiptsTable.addGlobalSecondaryIndex({
       indexName: "VendorIndex",
-      partitionKey: { name: "vendor", type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "vendorLower", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
     });
 
-    // 👇 Lambda function for receipt processing with AWS Textract
-    const receiptLambda = new lambda.Function(this, "ReceiptLambda", {
+    // Add GSI for querying by category
+    receiptsTable.addGlobalSecondaryIndex({
+      indexName: "CategoryIndex",
+      partitionKey: { name: "category", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
+    });
+
+    // 👇 Lambda function for API Gateway entry point
+    const apiLambda = new lambda.Function(this, "ApiLambda", {
       runtime: lambda.Runtime.NODEJS_18_X,
       handler: "index.handler",
       code: lambda.Code.fromAsset(path.join(__dirname, "../../backend")),
-      timeout: Duration.seconds(30), // Timeout for AWS Textract processing
-      memorySize: 512, // Increased memory for image processing
+      timeout: Duration.seconds(30),
+      memorySize: 256,
       environment: {
-        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1', // Optimize SDK v3 performance
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
         RECEIPTS_TABLE: receiptsTable.tableName,
       },
     });
 
-    // 👇 Add AWS Textract permissions to Lambda (exclusive OCR processing)
-    receiptLambda.addToRolePolicy(
+    // 👇 Lambda function for Textract AnalyzeExpense processing
+    const textractLambda = new lambda.Function(this, "TextractLambda", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: "textract-function.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../../backend")),
+      timeout: Duration.seconds(60), // Textract can take longer
+      memorySize: 1024, // More memory for image processing
+      environment: {
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
+      },
+    });
+
+    // 👇 Lambda function for Bedrock Claude processing
+    const bedrockLambda = new lambda.Function(this, "BedrockLambda", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: "bedrock-function.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../../backend")),
+      timeout: Duration.seconds(120), // Bedrock can take longer
+      memorySize: 512,
+      environment: {
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
+      },
+    });
+
+    // 👇 Lambda function for DynamoDB operations
+    const dynamoLambda = new lambda.Function(this, "DynamoLambda", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: "dynamodb-function.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../../backend")),
+      timeout: Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
+        RECEIPTS_TABLE: receiptsTable.tableName,
+      },
+    });
+
+    // 👇 Lambda function for status checking
+    const statusLambda = new lambda.Function(this, "StatusLambda", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      handler: "status-function.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../../backend")),
+      timeout: Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
+        RECEIPTS_TABLE: receiptsTable.tableName,
+      },
+    });
+
+    // 👇 Step Function tasks
+    const textractTask = new sfnTasks.LambdaInvoke(this, "TextractTask", {
+      lambdaFunction: textractLambda,
+      outputPath: "$.Payload",
+    });
+
+    const bedrockTask = new sfnTasks.LambdaInvoke(this, "BedrockTask", {
+      lambdaFunction: bedrockLambda,
+      outputPath: "$.Payload",
+    });
+
+    const dynamoTask = new sfnTasks.LambdaInvoke(this, "DynamoTask", {
+      lambdaFunction: dynamoLambda,
+      outputPath: "$.Payload",
+    });
+
+    // 👇 Step Function definition
+    const definition = textractTask
+      .next(bedrockTask)
+      .next(dynamoTask);
+
+    // 👇 Create Step Function
+    const receiptProcessingStateMachine = new stepfunctions.StateMachine(this, "ReceiptProcessingStateMachine", {
+      definition,
+      timeout: Duration.minutes(10),
+      stateMachineName: "SnapTally-ReceiptProcessing",
+    });
+
+    // 👇 Add Step Function ARN to API Lambda environment
+    apiLambda.addEnvironment("STEP_FUNCTION_ARN", receiptProcessingStateMachine.stateMachineArn);
+
+    // 👇 Permissions for API Lambda
+    receiptProcessingStateMachine.grantStartExecution(apiLambda);
+
+    // 👇 Permissions for Textract Lambda
+    textractLambda.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "textract:DetectDocumentText",
-          "textract:AnalyzeDocument" // For future enhanced features
+          "textract:AnalyzeExpense",
+          "textract:DetectDocumentText"
         ],
         resources: ["*"],
       })
     );
 
-    // 👇 Grant DynamoDB permissions to Lambda
-    receiptsTable.grantWriteData(receiptLambda);
+    // 👇 Permissions for Bedrock Lambda
+    bedrockLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "bedrock:InvokeModel"
+        ],
+        resources: [
+          "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0"
+        ],
+      })
+    );
 
-    // 👇 API Gateway with /receipt POST endpoint
+    // 👇 Permissions for DynamoDB Lambda
+    receiptsTable.grantWriteData(dynamoLambda);
+
+    // 👇 Permissions for Status Lambda
+    receiptsTable.grantReadData(statusLambda);
+    statusLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "states:DescribeExecution"
+        ],
+        resources: ["*"],
+      })
+    );
+
+    // 👇 API Gateway with enhanced routes
     const api = new apigateway.RestApi(this, "SnapTallyAPI", {
       restApiName: "SnapTally Service",
+      description: "Advanced Receipt Processing API with Textract and Bedrock",
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
         allowMethods: apigateway.Cors.ALL_METHODS,
+        allowHeaders: ['Content-Type', 'X-Amz-Date', 'Authorization', 'X-Api-Key'],
       },
     });
 
+    // 👇 Receipt processing endpoint
     const receipt = api.root.addResource("receipt");
-    receipt.addMethod("POST", new apigateway.LambdaIntegration(receiptLambda));
+    receipt.addMethod("POST", new apigateway.LambdaIntegration(apiLambda));
 
-    // ✅ You can still add more resources here later (e.g., SQS, DynamoDB, etc.)
+    // 👇 Status checking endpoint
+    const status = api.root.addResource("status");
+    const statusWithId = status.addResource("{receiptId}");
+    statusWithId.addMethod("GET", new apigateway.LambdaIntegration(statusLambda));
+
+    // 👇 Output important values
+    new (require("aws-cdk-lib").CfnOutput)(this, "ApiGatewayUrl", {
+      value: api.url,
+      description: "API Gateway URL",
+    });
+
+    new (require("aws-cdk-lib").CfnOutput)(this, "DynamoDBTableName", {
+      value: receiptsTable.tableName,
+      description: "DynamoDB Table Name",
+    });
+
+    new (require("aws-cdk-lib").CfnOutput)(this, "StateMachineArn", {
+      value: receiptProcessingStateMachine.stateMachineArn,
+      description: "Step Function State Machine ARN",
+    });
   }
 }
 
