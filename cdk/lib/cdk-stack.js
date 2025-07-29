@@ -27,17 +27,31 @@ class CdkStack extends Stack {
       timeToLiveAttribute: "ttl", // Enable TTL for compliance
     });
 
-    // Add GSIs one at a time to avoid "Cannot perform more than one GSI creation" error
-    // Stage 1: Add VendorLowerIndex first
-    receiptsTable.addGlobalSecondaryIndex({
-      indexName: "VendorLowerIndex",
-      partitionKey: { name: "vendorLower", type: dynamodb.AttributeType.STRING },
-      sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
-    });
-
-    // Note: Additional GSIs will be added in subsequent deployments
-    // Stage 2: CategoryTimestampIndex (deploy separately)
-    // Stage 3: UserTimestampIndex (deploy separately)
+    // TEMPORARILY REMOVING ALL GSIs TO FIX DEPLOYMENT CONFLICT
+    // GSIs will be added manually after clean deployment
+    
+    // Uncomment these ONE AT A TIME after initial deployment:
+    
+    // STEP 1: After initial deployment, uncomment this first:
+    // receiptsTable.addGlobalSecondaryIndex({
+    //   indexName: "VendorLowerIndex",
+    //   partitionKey: { name: "vendorLower", type: dynamodb.AttributeType.STRING },
+    //   sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
+    // });
+    
+    // STEP 2: After Step 1 deploys successfully, uncomment this:
+    // receiptsTable.addGlobalSecondaryIndex({
+    //   indexName: "CategoryTimestampIndex",
+    //   partitionKey: { name: "category", type: dynamodb.AttributeType.STRING },
+    //   sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
+    // });
+    
+    // STEP 3: After Step 2 deploys successfully, uncomment this:
+    // receiptsTable.addGlobalSecondaryIndex({
+    //   indexName: "UserTimestampIndex",
+    //   partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+    //   sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
+    // });
 
     // 👇 Lambda function for API Gateway entry point
     const apiLambda = new lambda.Function(this, "ApiLambda", {
