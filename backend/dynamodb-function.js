@@ -52,7 +52,7 @@ exports.handler = async (event) => {
       updatedAt: new Date().toISOString(),
       
       // Additional fields for future features
-      userId: null, // Will be populated when Cognito is integrated
+      userId: 'anonymous', // Will be populated when Cognito is integrated
       tags: [],
       category: determineCategory(parsedData.merchant || parsedData.vendor),
       
