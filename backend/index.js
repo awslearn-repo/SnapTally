@@ -1,7 +1,14 @@
 const { TextractClient, DetectDocumentTextCommand } = require("@aws-sdk/client-textract");
+const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+const { DynamoDBDocumentClient, PutCommand } = require("@aws-sdk/lib-dynamodb");
+const { v4: uuidv4 } = require("uuid");
 
-// Initialize AWS Textract client
+// Initialize AWS clients
 const textract = new TextractClient({ region: 'us-east-1' });
+const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
+const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
+const RECEIPTS_TABLE = process.env.RECEIPTS_TABLE || 'SnapTally-Receipts';
 
 exports.handler = async (event) => {
   try {
@@ -43,8 +50,39 @@ exports.handler = async (event) => {
 
     console.log(`AWS Textract extracted ${extractedText.length} characters of text`);
     
-    // Basic receipt parsing (this is a simple implementation)
+    // Enhanced receipt parsing
     const receiptData = parseReceiptText(extractedText);
+    
+    // Generate unique receipt ID
+    const receiptId = uuidv4();
+    const timestamp = new Date().toISOString();
+    
+    // Prepare data for DynamoDB
+    const receiptRecord = {
+      receiptId,
+      timestamp,
+      vendor: receiptData.vendor,
+      date: receiptData.date,
+      total: receiptData.total,
+      subtotal: receiptData.subtotal,
+      tax: receiptData.tax,
+      items: receiptData.items,
+      rawText: extractedText,
+      itemCount: receiptData.items.length,
+      processed: true
+    };
+
+    // Save to DynamoDB
+    try {
+      await docClient.send(new PutCommand({
+        TableName: RECEIPTS_TABLE,
+        Item: receiptRecord
+      }));
+      console.log(`Receipt saved to DynamoDB with ID: ${receiptId}`);
+    } catch (dbError) {
+      console.error('DynamoDB save error:', dbError);
+      // Continue processing even if DB save fails
+    }
 
     return {
       statusCode: 200,
@@ -55,6 +93,8 @@ exports.handler = async (event) => {
         "Access-Control-Allow-Methods": "POST, OPTIONS"
       },
       body: JSON.stringify({
+        success: true,
+        receiptId,
         data: receiptData,
         rawText: extractedText
       }),
@@ -94,19 +134,45 @@ function parseReceiptText(text) {
   let vendor = null;
   let date = null;
   let total = null;
+  let subtotal = null;
+  let tax = null;
   const items = [];
 
-  // Simple patterns for common receipt elements
-  const datePattern = /\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/;
-  const pricePattern = /\$?\d+\.\d{2}/g;
-  const totalPattern = /total.*?(\$?\d+\.\d{2})/i;
+  // Enhanced patterns for better detection
+  const datePattern = /\b\d{1,2}[\/\-]\d{1,2}[\/\-](\d{2}|\d{4})\b/;
+  const timePattern = /\b\d{1,2}:\d{2}(:\d{2})?\s*(AM|PM)?\b/i;
+  const pricePattern = /\$?\d+\.\d{2}/;
+  const totalPattern = /(total|grand\s*total|amount\s*due)\s*:?\s*\$?(\d+\.\d{2})/i;
+  const subtotalPattern = /(subtotal|sub\s*total)\s*:?\s*\$?(\d+\.\d{2})/i;
+  const taxPattern = /(tax|hst|gst|pst|sales\s*tax)\s*:?\s*\$?(\d+\.\d{2})/i;
+  
+  // Common non-item keywords to filter out
+  const nonItemKeywords = [
+    'total', 'subtotal', 'tax', 'cash', 'change', 'credit', 'debit', 'visa', 'mastercard',
+    'thank', 'you', 'welcome', 'store', 'receipt', 'transaction', 'date', 'time',
+    'cashier', 'register', 'card', 'approval', 'reference', 'auth', 'merchant'
+  ];
 
-  for (const line of lines) {
-    // Extract vendor (usually first meaningful line)
-    if (!vendor && line.length > 3 && !datePattern.test(line) && !pricePattern.test(line)) {
-      vendor = line.trim();
+  // First pass: Extract vendor (usually first meaningful line that's not a date/time)
+  for (let i = 0; i < Math.min(5, lines.length); i++) {
+    const line = lines[i].trim();
+    if (!vendor && 
+        line.length > 2 && 
+        !datePattern.test(line) && 
+        !timePattern.test(line) &&
+        !pricePattern.test(line) &&
+        !line.match(/^\d+$/) && // Not just numbers
+        line.length < 50) { // Not too long
+      vendor = line;
+      break;
     }
+  }
 
+  // Second pass: Extract other data
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    const nextLine = i + 1 < lines.length ? lines[i + 1].trim() : '';
+    
     // Extract date
     if (!date && datePattern.test(line)) {
       const dateMatch = line.match(datePattern);
@@ -119,20 +185,101 @@ function parseReceiptText(text) {
     if (!total && totalPattern.test(line)) {
       const totalMatch = line.match(totalPattern);
       if (totalMatch) {
-        total = totalMatch[1];
+        total = '$' + totalMatch[2];
       }
     }
 
-    // Extract items (lines with prices that aren't totals)
-    if (pricePattern.test(line) && !totalPattern.test(line)) {
-      items.push(line.trim());
+    // Extract subtotal
+    if (!subtotal && subtotalPattern.test(line)) {
+      const subtotalMatch = line.match(subtotalPattern);
+      if (subtotalMatch) {
+        subtotal = '$' + subtotalMatch[2];
+      }
+    }
+
+    // Extract tax
+    if (!tax && taxPattern.test(line)) {
+      const taxMatch = line.match(taxPattern);
+      if (taxMatch) {
+        tax = '$' + taxMatch[2];
+      }
+    }
+
+    // Extract items - enhanced logic
+    if (pricePattern.test(line) && 
+        !totalPattern.test(line) && 
+        !subtotalPattern.test(line) && 
+        !taxPattern.test(line)) {
+      
+      const priceMatch = line.match(pricePattern);
+      if (priceMatch) {
+        const price = priceMatch[0];
+        
+        // Try to extract item name (text before the price)
+        let itemName = line.replace(pricePattern, '').trim();
+        
+        // Clean up item name
+        itemName = itemName.replace(/^\d+\s*x?\s*/i, ''); // Remove quantity prefix
+        itemName = itemName.replace(/\s+/g, ' '); // Normalize spaces
+        
+        // Check if this looks like a real item
+        const isRealItem = itemName.length > 1 && 
+                          !nonItemKeywords.some(keyword => 
+                            itemName.toLowerCase().includes(keyword.toLowerCase()));
+        
+        if (isRealItem) {
+          // Try to extract quantity
+          const qtyMatch = line.match(/^(\d+)\s*x?\s*/i);
+          const quantity = qtyMatch ? parseInt(qtyMatch[1]) : 1;
+          
+          items.push({
+            name: itemName || 'Item',
+            price: price,
+            quantity: quantity,
+            lineTotal: price
+          });
+        }
+      }
+    }
+  }
+
+  // Fallback: if no items found, try a different approach
+  if (items.length === 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      
+      // Look for lines that might be items (have letters and numbers)
+      if (line.length > 3 && 
+          /[a-zA-Z]/.test(line) && 
+          /\d/.test(line) &&
+          !datePattern.test(line) &&
+          !timePattern.test(line) &&
+          !totalPattern.test(line) &&
+          !subtotalPattern.test(line) &&
+          !taxPattern.test(line)) {
+        
+        const priceMatch = line.match(/\$?(\d+\.\d{2})/);
+        if (priceMatch) {
+          let itemName = line.replace(/\$?\d+\.\d{2}/g, '').trim();
+          if (itemName.length > 1) {
+            items.push({
+              name: itemName,
+              price: '$' + priceMatch[1],
+              quantity: 1,
+              lineTotal: '$' + priceMatch[1]
+            });
+          }
+        }
+      }
     }
   }
 
   return {
-    vendor: vendor || "Unknown",
-    date: date || "Unknown",
+    vendor: vendor || "Unknown Vendor",
+    date: date || "Unknown Date",
     total: total || "Unknown",
-    items: items.length > 0 ? items : ["No items found"]
+    subtotal: subtotal || null,
+    tax: tax || null,
+    items: items.length > 0 ? items : [{ name: "No items detected", price: "N/A", quantity: 0, lineTotal: "N/A" }]
   };
 }
