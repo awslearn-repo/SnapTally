@@ -49,9 +49,10 @@ exports.handler = async (event) => {
       .join('\n');
 
     console.log(`AWS Textract extracted ${extractedText.length} characters of text`);
+    console.log('Raw extracted text:', extractedText);
     
-    // Enhanced receipt parsing
-    const receiptData = parseReceiptText(extractedText);
+    // Enhanced receipt parsing with intelligence
+    const receiptData = parseReceiptTextIntelligent(extractedText);
     
     // Generate unique receipt ID
     const receiptId = uuidv4();
@@ -69,7 +70,8 @@ exports.handler = async (event) => {
       items: receiptData.items,
       rawText: extractedText,
       itemCount: receiptData.items.length,
-      processed: true
+      processed: true,
+      confidence: receiptData.confidence
     };
 
     // Save to DynamoDB
@@ -128,8 +130,10 @@ exports.handler = async (event) => {
   }
 };
 
-function parseReceiptText(text) {
-  const lines = text.split('\n').filter(line => line.trim());
+function parseReceiptTextIntelligent(text) {
+  const lines = text.split('\n').filter(line => line.trim()).map(line => line.trim());
+  
+  console.log('Processing lines:', lines);
   
   let vendor = null;
   let date = null;
@@ -137,136 +141,290 @@ function parseReceiptText(text) {
   let subtotal = null;
   let tax = null;
   const items = [];
+  let confidence = { vendor: 0, date: 0, items: 0, total: 0 };
 
-  // Enhanced patterns for better detection
-  const datePattern = /\b\d{1,2}[\/\-]\d{1,2}[\/\-](\d{2}|\d{4})\b/;
+  // Enhanced date patterns for various formats
+  const datePatterns = [
+    // MM/DD/YYYY, MM-DD-YYYY, MM.DD.YYYY
+    /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/,
+    // MM/DD/YY, MM-DD-YY
+    /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})\b/,
+    // DD/MM/YYYY (European format)
+    /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/,
+    // YYYY-MM-DD (ISO format)
+    /\b(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})\b/,
+    // Month DD, YYYY (e.g., Jan 15, 2024)
+    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2}),?\s+(\d{4})\b/i,
+    // DD Month YYYY (e.g., 15 Jan 2024)
+    /\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})\b/i
+  ];
+
   const timePattern = /\b\d{1,2}:\d{2}(:\d{2})?\s*(AM|PM)?\b/i;
-  const pricePattern = /\$?\d+\.\d{2}/;
-  const totalPattern = /(total|grand\s*total|amount\s*due)\s*:?\s*\$?(\d+\.\d{2})/i;
-  const subtotalPattern = /(subtotal|sub\s*total)\s*:?\s*\$?(\d+\.\d{2})/i;
-  const taxPattern = /(tax|hst|gst|pst|sales\s*tax)\s*:?\s*\$?(\d+\.\d{2})/i;
   
-  // Common non-item keywords to filter out
+  // Enhanced price patterns
+  const pricePatterns = [
+    /\$\s*(\d+\.\d{2})/,           // $12.99
+    /(\d+\.\d{2})\s*\$/,           // 12.99$
+    /(\d+\.\d{2})/,                // 12.99
+    /(\d+),(\d{2})/,               // European format 12,99
+  ];
+
+  // Enhanced total patterns
+  const totalPatterns = [
+    /(total|grand\s*total|amount\s*due|balance\s*due|final\s*total)\s*:?\s*\$?\s*(\d+[,.]?\d{2})/i,
+    /(total)\s+(\d+\.\d{2})/i,
+    /^(total)\s*(\d+\.\d{2})$/i,
+    /(amt\s*due|amount)\s*:?\s*\$?\s*(\d+\.\d{2})/i
+  ];
+
+  // Enhanced subtotal patterns
+  const subtotalPatterns = [
+    /(subtotal|sub\s*total|sub-total)\s*:?\s*\$?\s*(\d+\.\d{2})/i,
+    /(merchandise|merch)\s*:?\s*\$?\s*(\d+\.\d{2})/i
+  ];
+
+  // Enhanced tax patterns
+  const taxPatterns = [
+    /(tax|hst|gst|pst|sales\s*tax|vat)\s*:?\s*\$?\s*(\d+\.\d{2})/i,
+    /(tax\s*total)\s*:?\s*\$?\s*(\d+\.\d{2})/i,
+    /(\d+\.?\d*%\s*tax)\s*:?\s*\$?\s*(\d+\.\d{2})/i
+  ];
+  
+  // Comprehensive non-item keywords
   const nonItemKeywords = [
     'total', 'subtotal', 'tax', 'cash', 'change', 'credit', 'debit', 'visa', 'mastercard',
     'thank', 'you', 'welcome', 'store', 'receipt', 'transaction', 'date', 'time',
-    'cashier', 'register', 'card', 'approval', 'reference', 'auth', 'merchant'
+    'cashier', 'register', 'card', 'approval', 'reference', 'auth', 'merchant',
+    'phone', 'address', 'street', 'city', 'state', 'zip', 'www', 'http', '.com',
+    'manager', 'customer', 'service', 'return', 'policy', 'hours', 'open', 'closed',
+    'tender', 'payment', 'method', 'account', 'balance', 'points', 'rewards',
+    'discount', 'coupon', 'savings', 'promotion', 'offer', 'sale'
   ];
 
-  // First pass: Extract vendor (usually first meaningful line that's not a date/time)
-  for (let i = 0; i < Math.min(5, lines.length); i++) {
-    const line = lines[i].trim();
+  // Known store chains and patterns
+  const storePatterns = [
+    /walmart/i, /target/i, /costco/i, /home\s*depot/i, /lowes/i, /kroger/i,
+    /safeway/i, /albertsons/i, /publix/i, /whole\s*foods/i, /trader\s*joe/i,
+    /cvs/i, /walgreens/i, /rite\s*aid/i, /best\s*buy/i, /staples/i, /office\s*depot/i,
+    /mcdonald/i, /burger\s*king/i, /kfc/i, /subway/i, /starbucks/i, /dunkin/i,
+    /shell/i, /exxon/i, /chevron/i, /bp/i, /mobil/i, /texaco/i
+  ];
+
+  // First pass: Extract vendor with intelligence
+  for (let i = 0; i < Math.min(10, lines.length); i++) {
+    const line = lines[i];
+    
+    // Check for known store patterns
+    for (const pattern of storePatterns) {
+      if (pattern.test(line)) {
+        vendor = line;
+        confidence.vendor = 0.9;
+        break;
+      }
+    }
+    
+    // If no store pattern found, use heuristics
     if (!vendor && 
         line.length > 2 && 
-        !datePattern.test(line) && 
+        line.length < 50 &&
+        !datePatterns.some(p => p.test(line)) &&
         !timePattern.test(line) &&
-        !pricePattern.test(line) &&
-        !line.match(/^\d+$/) && // Not just numbers
-        line.length < 50) { // Not too long
-      vendor = line;
-      break;
+        !pricePatterns.some(p => p.test(line)) &&
+        !line.match(/^\d+$/) &&
+        !line.toLowerCase().includes('receipt') &&
+        !line.toLowerCase().includes('invoice')) {
+      
+      // Score the line as potential vendor
+      let score = 0.5;
+      
+      // Bonus for being early in receipt
+      if (i < 3) score += 0.2;
+      
+      // Bonus for proper case
+      if (line.match(/^[A-Z][a-z]+/)) score += 0.1;
+      
+      // Penalty for all caps (might be header info)
+      if (line === line.toUpperCase() && line.length > 10) score -= 0.2;
+      
+      // Penalty for containing numbers
+      if (/\d/.test(line)) score -= 0.1;
+      
+      if (score > confidence.vendor) {
+        vendor = line;
+        confidence.vendor = score;
+      }
+    }
+    
+    if (vendor && confidence.vendor > 0.8) break;
+  }
+
+  // Second pass: Extract date with multiple patterns
+  for (const line of lines) {
+    if (date) break;
+    
+    for (const pattern of datePatterns) {
+      const match = line.match(pattern);
+      if (match) {
+        date = match[0];
+        confidence.date = 0.9;
+        console.log('Found date:', date, 'in line:', line);
+        break;
+      }
     }
   }
 
-  // Second pass: Extract other data
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    const nextLine = i + 1 < lines.length ? lines[i + 1].trim() : '';
-    
-    // Extract date
-    if (!date && datePattern.test(line)) {
-      const dateMatch = line.match(datePattern);
-      if (dateMatch) {
-        date = dateMatch[0];
-      }
-    }
-
+  // Third pass: Extract financial information
+  for (const line of lines) {
     // Extract total
-    if (!total && totalPattern.test(line)) {
-      const totalMatch = line.match(totalPattern);
-      if (totalMatch) {
-        total = '$' + totalMatch[2];
+    if (!total) {
+      for (const pattern of totalPatterns) {
+        const match = line.match(pattern);
+        if (match) {
+          const amount = match[2] || match[1];
+          if (amount && amount.match(/\d+\.\d{2}/)) {
+            total = '$' + amount;
+            confidence.total = 0.9;
+            console.log('Found total:', total, 'in line:', line);
+            break;
+          }
+        }
       }
     }
 
     // Extract subtotal
-    if (!subtotal && subtotalPattern.test(line)) {
-      const subtotalMatch = line.match(subtotalPattern);
-      if (subtotalMatch) {
-        subtotal = '$' + subtotalMatch[2];
+    if (!subtotal) {
+      for (const pattern of subtotalPatterns) {
+        const match = line.match(pattern);
+        if (match) {
+          const amount = match[2];
+          if (amount && amount.match(/\d+\.\d{2}/)) {
+            subtotal = '$' + amount;
+            break;
+          }
+        }
       }
     }
 
     // Extract tax
-    if (!tax && taxPattern.test(line)) {
-      const taxMatch = line.match(taxPattern);
-      if (taxMatch) {
-        tax = '$' + taxMatch[2];
-      }
-    }
-
-    // Extract items - enhanced logic
-    if (pricePattern.test(line) && 
-        !totalPattern.test(line) && 
-        !subtotalPattern.test(line) && 
-        !taxPattern.test(line)) {
-      
-      const priceMatch = line.match(pricePattern);
-      if (priceMatch) {
-        const price = priceMatch[0];
-        
-        // Try to extract item name (text before the price)
-        let itemName = line.replace(pricePattern, '').trim();
-        
-        // Clean up item name
-        itemName = itemName.replace(/^\d+\s*x?\s*/i, ''); // Remove quantity prefix
-        itemName = itemName.replace(/\s+/g, ' '); // Normalize spaces
-        
-        // Check if this looks like a real item
-        const isRealItem = itemName.length > 1 && 
-                          !nonItemKeywords.some(keyword => 
-                            itemName.toLowerCase().includes(keyword.toLowerCase()));
-        
-        if (isRealItem) {
-          // Try to extract quantity
-          const qtyMatch = line.match(/^(\d+)\s*x?\s*/i);
-          const quantity = qtyMatch ? parseInt(qtyMatch[1]) : 1;
-          
-          items.push({
-            name: itemName || 'Item',
-            price: price,
-            quantity: quantity,
-            lineTotal: price
-          });
+    if (!tax) {
+      for (const pattern of taxPatterns) {
+        const match = line.match(pattern);
+        if (match) {
+          const amount = match[2];
+          if (amount && amount.match(/\d+\.\d{2}/)) {
+            tax = '$' + amount;
+            break;
+          }
         }
       }
     }
   }
 
-  // Fallback: if no items found, try a different approach
-  if (items.length === 0) {
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
+  // Fourth pass: Extract items with enhanced intelligence
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const nextLine = i + 1 < lines.length ? lines[i + 1] : '';
+    const prevLine = i > 0 ? lines[i - 1] : '';
+    
+    // Skip obvious non-item lines
+    if (isNonItemLine(line, nonItemKeywords, totalPatterns, subtotalPatterns, taxPatterns, datePatterns)) {
+      continue;
+    }
+    
+    // Check if line contains a price
+    let priceMatch = null;
+    let price = null;
+    
+    for (const pattern of pricePatterns) {
+      priceMatch = line.match(pattern);
+      if (priceMatch) {
+        price = priceMatch[1] || priceMatch[0];
+        if (!price.includes('$')) price = '$' + price;
+        break;
+      }
+    }
+    
+    if (price) {
+      // Extract item name (everything except the price)
+      let itemName = line;
       
-      // Look for lines that might be items (have letters and numbers)
-      if (line.length > 3 && 
+      // Remove price from item name
+      for (const pattern of pricePatterns) {
+        itemName = itemName.replace(pattern, '').trim();
+      }
+      
+      // Remove quantity prefix (e.g., "2 x", "3X", "QTY 2")
+      const qtyPatterns = [
+        /^(\d+)\s*[xX]\s*/,
+        /^QTY\s*(\d+)\s*/i,
+        /^(\d+)\s*@\s*/,
+        /^\*\s*(\d+)\s*/
+      ];
+      
+      let quantity = 1;
+      for (const qtyPattern of qtyPatterns) {
+        const qtyMatch = itemName.match(qtyPattern);
+        if (qtyMatch) {
+          quantity = parseInt(qtyMatch[1]);
+          itemName = itemName.replace(qtyPattern, '').trim();
+          break;
+        }
+      }
+      
+      // Clean up item name
+      itemName = cleanItemName(itemName);
+      
+      // Validate item name
+      if (isValidItemName(itemName, nonItemKeywords)) {
+        items.push({
+          name: itemName || 'Item',
+          price: price,
+          quantity: quantity,
+          lineTotal: price
+        });
+        
+        console.log('Found item:', { name: itemName, price, quantity });
+      }
+    } else {
+      // Check if this might be an item name with price on next line
+      if (nextLine && isLikelyPrice(nextLine) && isValidItemName(line, nonItemKeywords)) {
+        const nextPriceMatch = extractPrice(nextLine);
+        if (nextPriceMatch) {
+          items.push({
+            name: cleanItemName(line),
+            price: nextPriceMatch,
+            quantity: 1,
+            lineTotal: nextPriceMatch
+          });
+          
+          console.log('Found split item:', { name: line, price: nextPriceMatch });
+        }
+      }
+    }
+  }
+
+  // Fifth pass: If no items found, try fallback method
+  if (items.length === 0) {
+    console.log('No items found with primary method, trying fallback...');
+    
+    for (const line of lines) {
+      // Look for any line with letters and numbers that might be an item
+      if (line.length > 2 && 
           /[a-zA-Z]/.test(line) && 
           /\d/.test(line) &&
-          !datePattern.test(line) &&
-          !timePattern.test(line) &&
-          !totalPattern.test(line) &&
-          !subtotalPattern.test(line) &&
-          !taxPattern.test(line)) {
+          !isNonItemLine(line, nonItemKeywords, totalPatterns, subtotalPatterns, taxPatterns, datePatterns)) {
         
-        const priceMatch = line.match(/\$?(\d+\.\d{2})/);
+        const priceMatch = extractPrice(line);
         if (priceMatch) {
           let itemName = line.replace(/\$?\d+\.\d{2}/g, '').trim();
+          itemName = cleanItemName(itemName);
+          
           if (itemName.length > 1) {
             items.push({
               name: itemName,
-              price: '$' + priceMatch[1],
+              price: priceMatch,
               quantity: 1,
-              lineTotal: '$' + priceMatch[1]
+              lineTotal: priceMatch
             });
           }
         }
@@ -274,12 +432,102 @@ function parseReceiptText(text) {
     }
   }
 
+  confidence.items = items.length > 0 ? Math.min(0.9, items.length * 0.3) : 0;
+
   return {
     vendor: vendor || "Unknown Vendor",
-    date: date || "Unknown Date",
+    date: date || formatTodayDate(),
     total: total || "Unknown",
     subtotal: subtotal || null,
     tax: tax || null,
-    items: items.length > 0 ? items : [{ name: "No items detected", price: "N/A", quantity: 0, lineTotal: "N/A" }]
+    items: items.length > 0 ? items : [{ name: "No items detected", price: "N/A", quantity: 0, lineTotal: "N/A" }],
+    confidence: confidence
   };
+}
+
+// Helper functions
+function isNonItemLine(line, nonItemKeywords, totalPatterns, subtotalPatterns, taxPatterns, datePatterns) {
+  const lowerLine = line.toLowerCase();
+  
+  // Check against non-item keywords
+  if (nonItemKeywords.some(keyword => lowerLine.includes(keyword))) {
+    return true;
+  }
+  
+  // Check against financial patterns
+  if (totalPatterns.some(pattern => pattern.test(line)) ||
+      subtotalPatterns.some(pattern => pattern.test(line)) ||
+      taxPatterns.some(pattern => pattern.test(line))) {
+    return true;
+  }
+  
+  // Check against date patterns
+  if (datePatterns.some(pattern => pattern.test(line))) {
+    return true;
+  }
+  
+  // Check for header/footer patterns
+  if (line.match(/^[\-\*=]{3,}$/) || // divider lines
+      line.match(/^#{2,}$/) ||        // hash lines
+      line.match(/^\d{10,}$/) ||      // long numbers (transaction IDs)
+      line.match(/^[A-Z\s]{20,}$/) || // long all caps lines
+      line.length < 2) {              // too short
+    return true;
+  }
+  
+  return false;
+}
+
+function isValidItemName(name, nonItemKeywords) {
+  if (!name || name.length < 2) return false;
+  
+  const lowerName = name.toLowerCase();
+  
+  // Check against non-item keywords
+  if (nonItemKeywords.some(keyword => lowerName.includes(keyword))) {
+    return false;
+  }
+  
+  // Should have some letters
+  if (!/[a-zA-Z]/.test(name)) return false;
+  
+  // Shouldn't be all numbers
+  if (/^\d+$/.test(name)) return false;
+  
+  // Shouldn't be too long (likely description text)
+  if (name.length > 40) return false;
+  
+  return true;
+}
+
+function cleanItemName(name) {
+  if (!name) return '';
+  
+  return name
+    .replace(/^\*+\s*/, '')           // Remove leading asterisks
+    .replace(/\s*\*+$/, '')           // Remove trailing asterisks
+    .replace(/^\d+\s*/, '')           // Remove leading numbers
+    .replace(/\s{2,}/g, ' ')          // Normalize spaces
+    .replace(/[^\w\s\-\&\.\,]/g, '')  // Remove special chars except common ones
+    .trim();
+}
+
+function isLikelyPrice(line) {
+  return /\$?\d+\.\d{2}/.test(line) && 
+         !/[a-zA-Z]{5,}/.test(line);  // Not much text
+}
+
+function extractPrice(line) {
+  const match = line.match(/\$?\d+\.\d{2}/);
+  if (match) {
+    let price = match[0];
+    if (!price.includes('$')) price = '$' + price;
+    return price;
+  }
+  return null;
+}
+
+function formatTodayDate() {
+  const today = new Date();
+  return `${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getDate().toString().padStart(2, '0')}/${today.getFullYear()}`;
 }
