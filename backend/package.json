@@ -13,6 +13,8 @@
     "@aws-sdk/client-textract": "^3.478.0",
     "@aws-sdk/client-dynamodb": "^3.478.0",
     "@aws-sdk/lib-dynamodb": "^3.478.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.478.0",
+    "@aws-sdk/client-sfn": "^3.478.0",
     "uuid": "^9.0.1"
   }
 }

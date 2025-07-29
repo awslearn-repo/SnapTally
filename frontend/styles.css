@@ -261,7 +261,186 @@ button:hover {
   background: #5a6268;
 }
 
-/* Loading and Error States */
+/* Advanced Processing States */
+.processing-container {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 2rem;
+  border-radius: 12px;
+  text-align: center;
+}
+
+.processing-header h2 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.5rem;
+}
+
+.processing-header p {
+  margin: 0 0 2rem 0;
+  opacity: 0.9;
+  font-size: 0.9rem;
+}
+
+.processing-steps {
+  display: flex;
+  justify-content: space-between;
+  margin: 2rem 0;
+  padding: 0 1rem;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  opacity: 0.5;
+  transition: opacity 0.3s ease;
+}
+
+.step.active {
+  opacity: 1;
+  animation: pulse 2s infinite;
+}
+
+.step.completed {
+  opacity: 0.8;
+}
+
+.step-icon {
+  font-size: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.step-text {
+  font-size: 0.8rem;
+  text-align: center;
+  max-width: 80px;
+}
+
+.progress-bar {
+  background: rgba(255, 255, 255, 0.2);
+  height: 8px;
+  border-radius: 4px;
+  margin: 2rem 0 1rem 0;
+  overflow: hidden;
+}
+
+.progress-fill {
+  background: linear-gradient(90deg, #4CAF50, #81C784);
+  height: 100%;
+  width: 0%;
+  transition: width 0.5s ease;
+  border-radius: 4px;
+}
+
+.processing-note {
+  margin: 1rem 0 0 0;
+  font-size: 0.9rem;
+  opacity: 0.9;
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}
+
+/* Enhanced Receipt Container */
+.receipt-container.enhanced {
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+  border: 1px solid #e9ecef;
+}
+
+/* Metadata Section */
+.metadata-section {
+  padding: 1.5rem;
+  background: #f8f9fa;
+  border-top: 1px solid #e9ecef;
+}
+
+.metadata-section h3 {
+  margin: 0 0 1rem 0;
+  color: #2a3f54;
+  font-size: 1.2rem;
+}
+
+.metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.metadata-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.75rem;
+  background: white;
+  border-radius: 6px;
+  border: 1px solid #dee2e6;
+}
+
+.metadata-label {
+  font-weight: 600;
+  color: #495057;
+}
+
+.metadata-value {
+  font-weight: 500;
+  color: #0070f3;
+}
+
+/* Enhanced Action Buttons */
+.primary-btn {
+  background: linear-gradient(135deg, #0070f3, #0059c1);
+  color: white;
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  margin: 0 0.5rem;
+}
+
+.primary-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 112, 243, 0.3);
+}
+
+.retry-btn {
+  background: #dc3545;
+  color: white;
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.3s ease;
+}
+
+.retry-btn:hover {
+  background: #c82333;
+}
+
+/* Error Container */
+.error-container {
+  background: linear-gradient(135deg, #ff6b6b, #ee5a52);
+  color: white;
+  padding: 2rem;
+  border-radius: 12px;
+  text-align: center;
+}
+
+.error-container h2 {
+  margin: 0 0 1rem 0;
+  font-size: 1.5rem;
+}
+
+.error-container p {
+  margin: 0.5rem 0;
+  opacity: 0.9;
+}
+
+/* Loading and Error States (Legacy) */
 .loading {
   text-align: center;
   padding: 2rem;
