@@ -56,7 +56,7 @@ exports.handler = async (event) => {
       tags: [],
       category: determineCategory(parsedData.merchant || parsedData.vendor),
       
-      // Search fields for GSI
+      // Search fields for GSI (works whether GSIs exist or not)
       vendorLower: (parsedData.merchant || parsedData.vendor || '').toLowerCase(),
       totalAmount: parseFloat(parsedData.total || '0'),
       
