@@ -14,7 +14,7 @@ document.getElementById("processBtn").addEventListener("click", async () => {
     <div class="processing-container">
       <div class="processing-header">
         <h2>🚀 Advanced Receipt Processing</h2>
-        <p>Using AWS Textract AnalyzeExpense + Bedrock Claude</p>
+        <p>Using AWS Textract AnalyzeExpense + Bedrock Nova Lite</p>
       </div>
       <div class="processing-steps">
         <div class="step active" id="step-upload">
@@ -27,7 +27,7 @@ document.getElementById("processBtn").addEventListener("click", async () => {
         </div>
         <div class="step" id="step-bedrock">
           <span class="step-icon">🧠</span>
-          <span class="step-text">AI parsing with Claude</span>
+          <span class="step-text">AI parsing with Nova</span>
         </div>
         <div class="step" id="step-save">
           <span class="step-icon">💾</span>
@@ -253,7 +253,7 @@ function displayReceiptData(data, receiptId, metadata) {
           </div>
           <div class="metadata-item">
             <span class="metadata-label">Method:</span>
-            <span class="metadata-value">Textract + Claude AI</span>
+            <span class="metadata-value">Textract + Nova Lite</span>
           </div>
         </div>
       </div>
@@ -268,7 +268,7 @@ function displayReceiptData(data, receiptId, metadata) {
           <p><strong>🏪 Merchant:</strong> ${data.vendor || data.merchant}</p>
           <p><strong>📅 Date:</strong> ${data.date}</p>
           <p><strong>🆔 Receipt ID:</strong> <code>${receiptId}</code></p>
-          <p><small>🤖 Processed with advanced AI technology</small></p>
+          <p><small>🤖 Processed with AWS Nova Lite multimodal AI</small></p>
         </div>
       </div>
       

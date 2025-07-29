@@ -150,7 +150,7 @@ class CdkStack extends Stack {
       })
     );
 
-    // 👇 Permissions for Bedrock Lambda
+    // 👇 Permissions for Bedrock Lambda (Nova Lite)
     bedrockLambda.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -158,7 +158,7 @@ class CdkStack extends Stack {
           "bedrock:InvokeModel"
         ],
         resources: [
-          "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0"
+          "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0"
         ],
       })
     );
@@ -181,7 +181,7 @@ class CdkStack extends Stack {
     // 👇 API Gateway with enhanced routes
     const api = new apigateway.RestApi(this, "SnapTallyAPI", {
       restApiName: "SnapTally Service",
-      description: "Advanced Receipt Processing API with Textract and Bedrock",
+      description: "Advanced Receipt Processing API with Textract and Nova Lite",
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
         allowMethods: apigateway.Cors.ALL_METHODS,

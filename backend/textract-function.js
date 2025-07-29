@@ -106,6 +106,7 @@ exports.handler = async (event) => {
 
     return {
       receiptId,
+      imageBase64, // Pass image to next step for Nova Lite vision processing
       textractResult: {
         summaryFields,
         lineItems,
