@@ -8,6 +8,30 @@ const STEP_FUNCTION_ARN = process.env.STEP_FUNCTION_ARN;
 
 exports.handler = async (event) => {
   try {
+    // Debug: Log environment variables
+    console.log('Environment check:', {
+      STEP_FUNCTION_ARN: STEP_FUNCTION_ARN,
+      RECEIPTS_TABLE: process.env.RECEIPTS_TABLE,
+      hasStepFunctionArn: !!STEP_FUNCTION_ARN
+    });
+
+    // Validate Step Function ARN
+    if (!STEP_FUNCTION_ARN) {
+      console.error('STEP_FUNCTION_ARN environment variable is not set');
+      return {
+        statusCode: 500,
+        headers: { 
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Allow-Methods": "POST, OPTIONS"
+        },
+        body: JSON.stringify({ 
+          error: "Step Function ARN not configured",
+          details: "Missing STEP_FUNCTION_ARN environment variable"
+        }),
+      };
+    }
     // Handle CORS preflight
     if (event.httpMethod === 'OPTIONS') {
       return {
@@ -53,10 +77,18 @@ exports.handler = async (event) => {
     };
 
     // Start Step Function execution
+    console.log(`Attempting to start Step Function with ARN: ${STEP_FUNCTION_ARN}`);
+    
     const command = new StartExecutionCommand({
       stateMachineArn: STEP_FUNCTION_ARN,
       name: executionName,
       input: JSON.stringify(stepFunctionInput)
+    });
+
+    console.log('Step Function command:', {
+      stateMachineArn: command.input.stateMachineArn,
+      name: command.input.name,
+      inputLength: command.input.input?.length
     });
 
     const result = await sfnClient.send(command);
