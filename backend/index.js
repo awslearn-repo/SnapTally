@@ -9,6 +9,9 @@ const sfnClient = new SFNClient({
 
 const STEP_FUNCTION_ARN = process.env.STEP_FUNCTION_ARN;
 
+// Step Functions has a 256KB payload limit
+const STEP_FUNCTION_PAYLOAD_LIMIT = 256 * 1024; // 256KB in bytes
+
 exports.handler = async (event) => {
   try {
     // Debug: Log environment variables and AWS context
@@ -19,45 +22,6 @@ exports.handler = async (event) => {
       AWS_REGION: process.env.AWS_REGION,
       AWS_LAMBDA_FUNCTION_NAME: process.env.AWS_LAMBDA_FUNCTION_NAME
     });
-
-    // Test Step Functions connectivity
-    try {
-      console.log('Testing Step Functions service connectivity...');
-      const listCommand = new ListStateMachinesCommand({ maxResults: 10 });
-      const listResult = await sfnClient.send(listCommand);
-      console.log('Step Functions service accessible. Found', listResult.stateMachines?.length || 0, 'state machines');
-      
-      // Check if our specific Step Function exists
-      const ourStateMachine = listResult.stateMachines?.find(sm => sm.stateMachineArn === STEP_FUNCTION_ARN);
-      if (ourStateMachine) {
-        console.log('✅ Our Step Function exists:', ourStateMachine.name, 'Status:', ourStateMachine.status);
-      } else {
-        console.log('❌ Our Step Function NOT found in list. Available machines:', 
-          listResult.stateMachines?.map(sm => ({ name: sm.name, arn: sm.stateMachineArn })));
-      }
-    } catch (connectivityError) {
-      console.error('❌ Step Functions service connectivity test failed:', {
-        name: connectivityError.name,
-        message: connectivityError.message,
-        code: connectivityError.code,
-        statusCode: connectivityError.$metadata?.httpStatusCode
-      });
-      
-      return {
-        statusCode: 500,
-        headers: { 
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "Content-Type",
-          "Access-Control-Allow-Methods": "POST, OPTIONS"
-        },
-        body: JSON.stringify({ 
-          error: "Cannot connect to Step Functions service",
-          details: connectivityError.message,
-          errorType: connectivityError.name
-        }),
-      };
-    }
 
     // Validate Step Function ARN
     if (!STEP_FUNCTION_ARN) {
@@ -106,6 +70,27 @@ exports.handler = async (event) => {
       };
     }
 
+    // Check image size
+    const imageSizeKB = Math.round((imageBase64.length * 3) / 4 / 1024); // Base64 to bytes to KB
+    console.log(`Image size: ${imageSizeKB} KB`);
+
+    if (imageBase64.length > 150000) { // ~100KB base64 limit for safety
+      return {
+        statusCode: 400,
+        headers: { 
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Allow-Methods": "POST, OPTIONS"
+        },
+        body: JSON.stringify({ 
+          error: "Image too large for processing",
+          details: `Image size is ${imageSizeKB} KB. Please use an image smaller than 100 KB.`,
+          maxSizeKB: 100
+        }),
+      };
+    }
+
     // Generate unique receipt ID and execution name
     const receiptId = uuidv4();
     const executionName = `receipt-processing-${receiptId}`;
@@ -120,56 +105,81 @@ exports.handler = async (event) => {
       requestId: event.requestContext?.requestId || 'local-test'
     };
 
+    // Check total payload size
+    const payloadString = JSON.stringify(stepFunctionInput);
+    const payloadSizeBytes = Buffer.byteLength(payloadString, 'utf8');
+    const payloadSizeKB = Math.round(payloadSizeBytes / 1024);
+    
+    console.log(`Step Function payload size: ${payloadSizeKB} KB (${payloadSizeBytes} bytes)`);
+
+    if (payloadSizeBytes > STEP_FUNCTION_PAYLOAD_LIMIT) {
+      console.error(`Payload too large: ${payloadSizeBytes} bytes > ${STEP_FUNCTION_PAYLOAD_LIMIT} bytes limit`);
+      return {
+        statusCode: 400,
+        headers: { 
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Allow-Methods": "POST, OPTIONS"
+        },
+        body: JSON.stringify({ 
+          error: "Payload too large for Step Functions",
+          details: `Payload is ${payloadSizeKB} KB but Step Functions limit is 256 KB`,
+          payloadSizeKB: payloadSizeKB,
+          limitKB: 256
+        }),
+      };
+    }
+
     // Start Step Function execution
     console.log(`Attempting to start Step Function with ARN: ${STEP_FUNCTION_ARN}`);
     
     const command = new StartExecutionCommand({
       stateMachineArn: STEP_FUNCTION_ARN,
       name: executionName,
-      input: JSON.stringify(stepFunctionInput)
+      input: payloadString
     });
 
-    console.log('Step Function command:', {
-      stateMachineArn: command.input.stateMachineArn,
-      name: command.input.name,
-      inputLength: command.input.input?.length
+    console.log('Step Function command ready:', {
+      stateMachineArn: STEP_FUNCTION_ARN,
+      name: executionName,
+      inputSizeKB: payloadSizeKB
     });
 
-    // Add try-catch specifically around the Step Function call
+    // Execute Step Function
     let result;
     try {
       result = await sfnClient.send(command);
-      console.log(`Step Function started successfully: ${result.executionArn}`);
+      console.log(`✅ Step Function started successfully: ${result.executionArn}`);
     } catch (stepFunctionError) {
-      console.error('Step Function specific error:', stepFunctionError);
+      console.error('❌ Step Function execution failed:', stepFunctionError);
       console.error('Step Function error details:', {
         name: stepFunctionError.name,
         message: stepFunctionError.message,
         code: stepFunctionError.code,
         statusCode: stepFunctionError.$metadata?.httpStatusCode,
-        requestId: stepFunctionError.$metadata?.requestId,
-        attempts: stepFunctionError.$metadata?.attempts,
-        totalRetryDelay: stepFunctionError.$metadata?.totalRetryDelay
+        requestId: stepFunctionError.$metadata?.requestId
       });
       
-      // Try to get the raw response if available
-      if (stepFunctionError.$response) {
-        console.error('Raw AWS response:', {
-          statusCode: stepFunctionError.$response.statusCode,
-          headers: stepFunctionError.$response.headers,
-          hasBody: !!stepFunctionError.$response.body
-        });
-        
-        // Try to log the body if it's readable - but limit to prevent the large content error
-        try {
-          if (stepFunctionError.$response.body && typeof stepFunctionError.$response.body.toString === 'function') {
-            const responseBody = stepFunctionError.$response.body.toString();
-            console.error('Raw response body (first 200 chars):', responseBody.substring(0, 200));
-            console.error('Response body type:', typeof responseBody, 'Length:', responseBody.length);
-          }
-        } catch (bodyLogError) {
-          console.error('Could not log response body:', bodyLogError.message);
-        }
+      // Check for payload size error specifically
+      if (stepFunctionError.$metadata?.httpStatusCode === 413 || 
+          stepFunctionError.message?.includes('Payload Too Large') ||
+          stepFunctionError.message?.includes('content length exceeded')) {
+        return {
+          statusCode: 400,
+          headers: { 
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Methods": "POST, OPTIONS"
+          },
+          body: JSON.stringify({ 
+            error: "Image too large for processing",
+            details: "The image exceeds Step Functions payload limit. Please use a smaller image.",
+            payloadSizeKB: payloadSizeKB,
+            limitKB: 256
+          }),
+        };
       }
       
       // Check if this is a permission issue
@@ -225,7 +235,8 @@ exports.handler = async (event) => {
         receiptId,
         message: "Receipt processing started",
         executionArn: result.executionArn,
-        status: "PROCESSING"
+        status: "PROCESSING",
+        payloadSizeKB: payloadSizeKB
       }),
     };
 
