@@ -1,19 +1,63 @@
-const { SFNClient, StartExecutionCommand } = require("@aws-sdk/client-sfn");
+const { SFNClient, StartExecutionCommand, ListStateMachinesCommand } = require("@aws-sdk/client-sfn");
 const { v4: uuidv4 } = require("uuid");
 
-// Initialize AWS clients
-const sfnClient = new SFNClient({ region: 'us-east-1' });
+// Initialize AWS clients with explicit configuration
+const sfnClient = new SFNClient({ 
+  region: 'us-east-1',
+  maxAttempts: 3
+});
 
 const STEP_FUNCTION_ARN = process.env.STEP_FUNCTION_ARN;
 
 exports.handler = async (event) => {
   try {
-    // Debug: Log environment variables
+    // Debug: Log environment variables and AWS context
     console.log('Environment check:', {
       STEP_FUNCTION_ARN: STEP_FUNCTION_ARN,
       RECEIPTS_TABLE: process.env.RECEIPTS_TABLE,
-      hasStepFunctionArn: !!STEP_FUNCTION_ARN
+      hasStepFunctionArn: !!STEP_FUNCTION_ARN,
+      AWS_REGION: process.env.AWS_REGION,
+      AWS_LAMBDA_FUNCTION_NAME: process.env.AWS_LAMBDA_FUNCTION_NAME
     });
+
+    // Test Step Functions connectivity
+    try {
+      console.log('Testing Step Functions service connectivity...');
+      const listCommand = new ListStateMachinesCommand({ maxResults: 10 });
+      const listResult = await sfnClient.send(listCommand);
+      console.log('Step Functions service accessible. Found', listResult.stateMachines?.length || 0, 'state machines');
+      
+      // Check if our specific Step Function exists
+      const ourStateMachine = listResult.stateMachines?.find(sm => sm.stateMachineArn === STEP_FUNCTION_ARN);
+      if (ourStateMachine) {
+        console.log('✅ Our Step Function exists:', ourStateMachine.name, 'Status:', ourStateMachine.status);
+      } else {
+        console.log('❌ Our Step Function NOT found in list. Available machines:', 
+          listResult.stateMachines?.map(sm => ({ name: sm.name, arn: sm.stateMachineArn })));
+      }
+    } catch (connectivityError) {
+      console.error('❌ Step Functions service connectivity test failed:', {
+        name: connectivityError.name,
+        message: connectivityError.message,
+        code: connectivityError.code,
+        statusCode: connectivityError.$metadata?.httpStatusCode
+      });
+      
+      return {
+        statusCode: 500,
+        headers: { 
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Allow-Methods": "POST, OPTIONS"
+        },
+        body: JSON.stringify({ 
+          error: "Cannot connect to Step Functions service",
+          details: connectivityError.message,
+          errorType: connectivityError.name
+        }),
+      };
+    }
 
     // Validate Step Function ARN
     if (!STEP_FUNCTION_ARN) {
@@ -116,11 +160,12 @@ exports.handler = async (event) => {
           hasBody: !!stepFunctionError.$response.body
         });
         
-        // Try to log the body if it's readable
+        // Try to log the body if it's readable - but limit to prevent the large content error
         try {
           if (stepFunctionError.$response.body && typeof stepFunctionError.$response.body.toString === 'function') {
             const responseBody = stepFunctionError.$response.body.toString();
-            console.error('Raw response body (first 500 chars):', responseBody.substring(0, 500));
+            console.error('Raw response body (first 200 chars):', responseBody.substring(0, 200));
+            console.error('Response body type:', typeof responseBody, 'Length:', responseBody.length);
           }
         } catch (bodyLogError) {
           console.error('Could not log response body:', bodyLogError.message);
