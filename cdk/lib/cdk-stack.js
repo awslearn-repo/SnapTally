@@ -3,6 +3,7 @@ const lambda = require("aws-cdk-lib/aws-lambda");
 const apigateway = require("aws-cdk-lib/aws-apigateway");
 const iam = require("aws-cdk-lib/aws-iam");
 const dynamodb = require("aws-cdk-lib/aws-dynamodb");
+const s3 = require("aws-cdk-lib/aws-s3");
 const stepfunctions = require("aws-cdk-lib/aws-stepfunctions");
 const sfnTasks = require("aws-cdk-lib/aws-stepfunctions-tasks");
 const path = require("path");
@@ -53,6 +54,22 @@ class CdkStack extends Stack {
     //   sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
     // });
 
+    // 👇 S3 Bucket for receipt images
+    const receiptsBucket = new s3.Bucket(this, "ReceiptsBucket", {
+      bucketName: "snaptally-receipts",
+      removalPolicy: RemovalPolicy.RETAIN, // Keep images even if stack is deleted
+      versioned: false,
+      publicReadAccess: false,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      lifecycleRules: [
+        {
+          id: "DeleteOldReceipts",
+          enabled: true,
+          expiration: Duration.days(365) // Delete images after 1 year
+        }
+      ]
+    });
+
     // 👇 Lambda function for API Gateway entry point
     const apiLambda = new lambda.Function(this, "ApiLambda", {
       runtime: lambda.Runtime.NODEJS_18_X,
@@ -63,6 +80,7 @@ class CdkStack extends Stack {
       environment: {
         AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1',
         RECEIPTS_TABLE: receiptsTable.tableName,
+        S3_BUCKET: receiptsBucket.bucketName,
       },
     });
 
@@ -149,6 +167,7 @@ class CdkStack extends Stack {
 
     // 👇 Permissions for API Lambda
     receiptProcessingStateMachine.grantStartExecution(apiLambda);
+    receiptsBucket.grantReadWrite(apiLambda);
 
     // 👇 Permissions for Textract Lambda
     textractLambda.addToRolePolicy(
@@ -161,6 +180,7 @@ class CdkStack extends Stack {
         resources: ["*"],
       })
     );
+    receiptsBucket.grantRead(textractLambda);
 
     // 👇 Permissions for Bedrock Lambda (Nova Lite)
     bedrockLambda.addToRolePolicy(
@@ -174,6 +194,7 @@ class CdkStack extends Stack {
         ],
       })
     );
+    receiptsBucket.grantRead(bedrockLambda);
 
     // 👇 Permissions for DynamoDB Lambda
     receiptsTable.grantWriteData(dynamoLambda);

@@ -1,29 +1,31 @@
-const { SFNClient, StartExecutionCommand, ListStateMachinesCommand } = require("@aws-sdk/client-sfn");
+const { SFNClient, StartExecutionCommand } = require("@aws-sdk/client-sfn");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { v4: uuidv4 } = require("uuid");
 
-// Initialize AWS clients with explicit configuration
+// Initialize AWS clients
 const sfnClient = new SFNClient({ 
   region: 'us-east-1',
   maxAttempts: 3
 });
 
-const STEP_FUNCTION_ARN = process.env.STEP_FUNCTION_ARN;
+const s3Client = new S3Client({ 
+  region: 'us-east-1'
+});
 
-// Step Functions has a 256KB payload limit
-const STEP_FUNCTION_PAYLOAD_LIMIT = 256 * 1024; // 256KB in bytes
+const STEP_FUNCTION_ARN = process.env.STEP_FUNCTION_ARN;
+const S3_BUCKET = process.env.S3_BUCKET || 'snaptally-receipts';
 
 exports.handler = async (event) => {
   try {
-    // Debug: Log environment variables and AWS context
+    // Debug: Log environment variables
     console.log('Environment check:', {
       STEP_FUNCTION_ARN: STEP_FUNCTION_ARN,
+      S3_BUCKET: S3_BUCKET,
       RECEIPTS_TABLE: process.env.RECEIPTS_TABLE,
-      hasStepFunctionArn: !!STEP_FUNCTION_ARN,
-      AWS_REGION: process.env.AWS_REGION,
-      AWS_LAMBDA_FUNCTION_NAME: process.env.AWS_LAMBDA_FUNCTION_NAME
+      AWS_REGION: process.env.AWS_REGION
     });
 
-    // Validate Step Function ARN
+    // Validate required environment variables
     if (!STEP_FUNCTION_ARN) {
       console.error('STEP_FUNCTION_ARN environment variable is not set');
       return {
@@ -70,11 +72,23 @@ exports.handler = async (event) => {
       };
     }
 
-    // Check image size
-    const imageSizeKB = Math.round((imageBase64.length * 3) / 4 / 1024); // Base64 to bytes to KB
+    // Generate unique receipt ID
+    const receiptId = uuidv4();
+    const timestamp = new Date().toISOString();
+    
+    console.log(`Processing receipt: ${receiptId}`);
+
+    // Convert base64 to buffer
+    const imageBuffer = Buffer.from(imageBase64, 'base64');
+    const imageSizeKB = Math.round(imageBuffer.length / 1024);
+    
     console.log(`Image size: ${imageSizeKB} KB`);
 
-    if (imageBase64.length > 150000) { // ~100KB base64 limit for safety
+    // Check reasonable image size limit (10MB)
+    const maxSizeMB = 10;
+    const maxSizeBytes = maxSizeMB * 1024 * 1024;
+    
+    if (imageBuffer.length > maxSizeBytes) {
       return {
         statusCode: 400,
         headers: { 
@@ -84,55 +98,72 @@ exports.handler = async (event) => {
           "Access-Control-Allow-Methods": "POST, OPTIONS"
         },
         body: JSON.stringify({ 
-          error: "Image too large for processing",
-          details: `Image size is ${imageSizeKB} KB. Please use an image smaller than 100 KB.`,
-          maxSizeKB: 100
+          error: "Image too large",
+          details: `Image size is ${imageSizeKB} KB. Maximum allowed is ${maxSizeMB} MB.`,
+          maxSizeMB: maxSizeMB
         }),
       };
     }
 
-    // Generate unique receipt ID and execution name
-    const receiptId = uuidv4();
-    const executionName = `receipt-processing-${receiptId}`;
+    // Upload image to S3
+    const s3Key = `receipts/${receiptId}/${timestamp.replace(/[:.]/g, '-')}.jpg`;
     
-    console.log(`Starting Step Function execution for receipt: ${receiptId}`);
+    try {
+      console.log(`Uploading to S3: ${S3_BUCKET}/${s3Key}`);
+      
+      const uploadCommand = new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: s3Key,
+        Body: imageBuffer,
+        ContentType: 'image/jpeg',
+        Metadata: {
+          receiptId: receiptId,
+          uploadTimestamp: timestamp,
+          originalSizeKB: imageSizeKB.toString()
+        }
+      });
 
-    // Prepare input for Step Function
+      await s3Client.send(uploadCommand);
+      console.log(`✅ Image uploaded to S3 successfully`);
+      
+    } catch (s3Error) {
+      console.error('❌ S3 upload failed:', s3Error);
+      return {
+        statusCode: 500,
+        headers: { 
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Allow-Methods": "POST, OPTIONS"
+        },
+        body: JSON.stringify({ 
+          error: "Failed to upload image",
+          details: "Could not store image for processing",
+          errorType: s3Error.name
+        }),
+      };
+    }
+
+    // Prepare minimal Step Function input (no image data!)
     const stepFunctionInput = {
       receiptId,
-      imageBase64,
-      timestamp: new Date().toISOString(),
-      requestId: event.requestContext?.requestId || 'local-test'
+      s3Bucket: S3_BUCKET,
+      s3Key: s3Key,
+      timestamp: timestamp,
+      requestId: event.requestContext?.requestId || 'local-test',
+      imageSizeKB: imageSizeKB
     };
 
-    // Check total payload size
+    // Check payload size (should be tiny now)
     const payloadString = JSON.stringify(stepFunctionInput);
     const payloadSizeBytes = Buffer.byteLength(payloadString, 'utf8');
     const payloadSizeKB = Math.round(payloadSizeBytes / 1024);
     
-    console.log(`Step Function payload size: ${payloadSizeKB} KB (${payloadSizeBytes} bytes)`);
-
-    if (payloadSizeBytes > STEP_FUNCTION_PAYLOAD_LIMIT) {
-      console.error(`Payload too large: ${payloadSizeBytes} bytes > ${STEP_FUNCTION_PAYLOAD_LIMIT} bytes limit`);
-      return {
-        statusCode: 400,
-        headers: { 
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "Content-Type",
-          "Access-Control-Allow-Methods": "POST, OPTIONS"
-        },
-        body: JSON.stringify({ 
-          error: "Payload too large for Step Functions",
-          details: `Payload is ${payloadSizeKB} KB but Step Functions limit is 256 KB`,
-          payloadSizeKB: payloadSizeKB,
-          limitKB: 256
-        }),
-      };
-    }
+    console.log(`Step Function payload size: ${payloadSizeKB} KB (${payloadSizeBytes} bytes) - Image stored in S3`);
 
     // Start Step Function execution
-    console.log(`Attempting to start Step Function with ARN: ${STEP_FUNCTION_ARN}`);
+    const executionName = `receipt-processing-${receiptId}`;
+    console.log(`Starting Step Function execution: ${executionName}`);
     
     const command = new StartExecutionCommand({
       stateMachineArn: STEP_FUNCTION_ARN,
@@ -140,86 +171,39 @@ exports.handler = async (event) => {
       input: payloadString
     });
 
-    console.log('Step Function command ready:', {
-      stateMachineArn: STEP_FUNCTION_ARN,
-      name: executionName,
-      inputSizeKB: payloadSizeKB
-    });
-
-    // Execute Step Function
     let result;
     try {
       result = await sfnClient.send(command);
       console.log(`✅ Step Function started successfully: ${result.executionArn}`);
     } catch (stepFunctionError) {
       console.error('❌ Step Function execution failed:', stepFunctionError);
-      console.error('Step Function error details:', {
-        name: stepFunctionError.name,
-        message: stepFunctionError.message,
-        code: stepFunctionError.code,
-        statusCode: stepFunctionError.$metadata?.httpStatusCode,
-        requestId: stepFunctionError.$metadata?.requestId
-      });
       
-      // Check for payload size error specifically
-      if (stepFunctionError.$metadata?.httpStatusCode === 413 || 
-          stepFunctionError.message?.includes('Payload Too Large') ||
-          stepFunctionError.message?.includes('content length exceeded')) {
-        return {
-          statusCode: 400,
-          headers: { 
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "POST, OPTIONS"
-          },
-          body: JSON.stringify({ 
-            error: "Image too large for processing",
-            details: "The image exceeds Step Functions payload limit. Please use a smaller image.",
-            payloadSizeKB: payloadSizeKB,
-            limitKB: 256
-          }),
-        };
+      // Clean up S3 object if Step Function fails
+      try {
+        const { DeleteObjectCommand } = require("@aws-sdk/client-s3");
+        await s3Client.send(new DeleteObjectCommand({
+          Bucket: S3_BUCKET,
+          Key: s3Key
+        }));
+        console.log('🧹 Cleaned up S3 object after Step Function failure');
+      } catch (cleanupError) {
+        console.error('Failed to cleanup S3 object:', cleanupError);
       }
       
-      // Check if this is a permission issue
-      if (stepFunctionError.name === 'AccessDeniedException' || stepFunctionError.code === 'AccessDenied') {
-        return {
-          statusCode: 500,
-          headers: { 
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "POST, OPTIONS"
-          },
-          body: JSON.stringify({ 
-            error: "Permission denied to start Step Function",
-            details: "Lambda function lacks permission to execute Step Function",
-            stepFunctionArn: STEP_FUNCTION_ARN
-          }),
-        };
-      }
-      
-      // Check if this is a resource not found issue
-      if (stepFunctionError.name === 'StateMachineDoesNotExist' || stepFunctionError.code === 'StateMachineDoesNotExist') {
-        return {
-          statusCode: 500,
-          headers: { 
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "POST, OPTIONS"
-          },
-          body: JSON.stringify({ 
-            error: "Step Function does not exist",
-            details: "The specified Step Function ARN does not exist or is in a different region",
-            stepFunctionArn: STEP_FUNCTION_ARN
-          }),
-        };
-      }
-      
-      // Re-throw for general error handling
-      throw stepFunctionError;
+      return {
+        statusCode: 500,
+        headers: { 
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Allow-Methods": "POST, OPTIONS"
+        },
+        body: JSON.stringify({ 
+          error: "Failed to start processing",
+          details: stepFunctionError.message,
+          errorType: stepFunctionError.name
+        }),
+      };
     }
 
     return {
@@ -236,19 +220,14 @@ exports.handler = async (event) => {
         message: "Receipt processing started",
         executionArn: result.executionArn,
         status: "PROCESSING",
+        s3Location: `s3://${S3_BUCKET}/${s3Key}`,
+        imageSizeKB: imageSizeKB,
         payloadSizeKB: payloadSizeKB
       }),
     };
 
   } catch (err) {
     console.error('Error starting receipt processing:', err);
-    console.error('Error details:', {
-      name: err.name,
-      message: err.message,
-      code: err.code,
-      statusCode: err.$metadata?.httpStatusCode,
-      requestId: err.$metadata?.requestId
-    });
     
     return {
       statusCode: 500,

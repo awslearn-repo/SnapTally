@@ -1,26 +1,58 @@
 const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-bedrock-runtime");
+const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 
-// Initialize Bedrock client
+// Initialize AWS clients
 const bedrock = new BedrockRuntimeClient({ region: 'us-east-1' });
+const s3Client = new S3Client({ region: 'us-east-1' });
 
 const NOVA_MODEL_ID = 'amazon.nova-lite-v1:0';
 
 exports.handler = async (event) => {
   try {
-    console.log('Starting Bedrock Nova Lite processing');
+    console.log('Bedrock Nova Lite processing started');
     
-    const { receiptId, textractResult, imageBase64 } = event;
+    const { receiptId, textractResult, s3Bucket, s3Key } = event;
     
-    if (!textractResult || !textractResult.rawText) {
-      throw new Error('No Textract result or raw text provided');
+    if (!receiptId || !textractResult) {
+      throw new Error('Missing required parameters: receiptId or textractResult');
     }
 
-    // Prepare the prompt for Nova Lite with vision capabilities
+    console.log(`Processing receipt ${receiptId} with Nova Lite multimodal AI`);
+
+    // Download image from S3 for Nova Lite vision processing
+    let imageBase64 = null;
+    if (s3Bucket && s3Key) {
+      try {
+        console.log('Downloading image from S3 for Nova Lite vision...');
+        const getObjectCommand = new GetObjectCommand({
+          Bucket: s3Bucket,
+          Key: s3Key
+        });
+
+        const s3Response = await s3Client.send(getObjectCommand);
+        
+        // Convert stream to buffer
+        const chunks = [];
+        for await (const chunk of s3Response.Body) {
+          chunks.push(chunk);
+        }
+        const imageBuffer = Buffer.concat(chunks);
+        imageBase64 = imageBuffer.toString('base64');
+        
+        console.log(`✅ Downloaded image for Nova Lite: ${Math.round(imageBuffer.length / 1024)} KB`);
+        
+      } catch (s3Error) {
+        console.error('❌ Failed to download image from S3 for Nova Lite:', s3Error);
+        // Continue without image for Nova Lite (text-only processing)
+      }
+    }
+
+    // Create enhanced prompt for Nova Lite using Textract data
     const prompt = createNovaReceiptParsingPrompt(textractResult);
     
-    console.log(`Processing receipt ${receiptId} with Nova Lite. Raw text length: ${textractResult.rawText.length}`);
-
-    // Prepare the request for Nova Lite with multimodal capabilities
+    console.log('Calling Nova Lite with multimodal input...');
+    
+    // Prepare Nova Lite request with both text and image
     const novaRequest = {
       messages: [
         {
@@ -34,12 +66,12 @@ exports.handler = async (event) => {
       ],
       inferenceConfig: {
         maxTokens: 4000,
-        temperature: 0.1, // Low temperature for consistent parsing
+        temperature: 0.1,
         topP: 0.9
       }
     };
 
-    // Add image if available for enhanced processing
+    // Add image for vision processing if available
     if (imageBase64) {
       novaRequest.messages[0].content.push({
         image: {
@@ -49,10 +81,11 @@ exports.handler = async (event) => {
           }
         }
       });
-      console.log('Added image data for Nova Lite vision processing');
+      console.log('Added image to Nova Lite request for vision processing');
+    } else {
+      console.log('Processing with text-only (no image available)');
     }
 
-    // Call Bedrock Nova Lite
     const command = new InvokeModelCommand({
       modelId: NOVA_MODEL_ID,
       contentType: 'application/json',
@@ -61,57 +94,67 @@ exports.handler = async (event) => {
 
     const response = await bedrock.send(command);
     const responseBody = JSON.parse(new TextDecoder().decode(response.body));
-    
-    console.log('Nova Lite processing completed');
+    const novaText = responseBody.output.message.content[0].text;
 
-    // Parse Nova's response
+    console.log('✅ Nova Lite processing completed');
+    console.log('Nova Lite response length:', novaText.length);
+
+    // Extract JSON from Nova Lite response
     let parsedData;
     try {
-      // Extract JSON from Nova's response
-      const novaText = responseBody.output.message.content[0].text;
-      console.log('Nova Lite raw response:', novaText);
-      
       // Try to extract JSON from the response
       const jsonMatch = novaText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         parsedData = JSON.parse(jsonMatch[0]);
+        console.log('✅ Successfully parsed JSON from Nova Lite response');
       } else {
-        throw new Error('No JSON found in Nova response');
+        throw new Error('No JSON found in Nova Lite response');
       }
     } catch (parseError) {
-      console.error('Error parsing Nova response:', parseError);
-      // Fallback to basic structure
+      console.warn('⚠️ Failed to parse Nova Lite JSON, using fallback data:', parseError.message);
       parsedData = createFallbackData(textractResult);
     }
 
-    // Enhance the parsed data with confidence scores
+    // Enhance parsed data with additional processing
     const enhancedData = enhanceParsedData(parsedData, textractResult);
 
-    console.log('Final parsed data:', JSON.stringify(enhancedData, null, 2));
+    // Add confidence scoring
+    enhancedData.metadata.confidence = calculateOverallConfidence(enhancedData, textractResult);
+
+    console.log(`✅ Bedrock processing completed for receipt ${receiptId}`);
+    console.log(`   - Merchant: ${enhancedData.merchant || enhancedData.vendor}`);
+    console.log(`   - Total: ${enhancedData.total}`);
+    console.log(`   - Items: ${enhancedData.items?.length || 0}`);
+    console.log(`   - Confidence: ${Math.round(enhancedData.metadata.confidence * 100)}%`);
 
     return {
       receiptId,
       parsedData: enhancedData,
+      s3Location: `s3://${s3Bucket}/${s3Key}`,
       status: 'BEDROCK_COMPLETED',
       timestamp: new Date().toISOString(),
-      novaResponse: responseBody.output.message.content[0].text
+      novaResponse: novaText.substring(0, 500) + (novaText.length > 500 ? '...' : ''), // Truncate for logging
+      processingMethod: imageBase64 ? 'nova-lite-multimodal' : 'nova-lite-text-only'
     };
 
   } catch (error) {
-    console.error('Bedrock processing error:', error);
+    console.error('❌ Bedrock processing failed:', error);
     
-    // Fallback processing if Bedrock fails
-    const fallbackData = createFallbackData(event.textractResult);
-    
+    // Return fallback data in case of error
+    const fallbackData = event.textractResult ? createFallbackData(event.textractResult) : {
+      merchant: 'Unknown',
+      total: '0.00',
+      items: [],
+      date: formatTodayDate()
+    };
+
     return {
-      receiptId: event.receiptId,
+      receiptId: event.receiptId || 'unknown',
       parsedData: fallbackData,
-      status: 'BEDROCK_FALLBACK',
+      status: 'BEDROCK_FAILED',
+      error: error.message,
       timestamp: new Date().toISOString(),
-      error: {
-        message: error.message,
-        type: 'BEDROCK_ERROR'
-      }
+      processingMethod: 'fallback'
     };
   }
 };
@@ -119,206 +162,139 @@ exports.handler = async (event) => {
 function createNovaReceiptParsingPrompt(textractResult) {
   const { summaryFields, lineItems, rawText } = textractResult;
   
-  let prompt = `You are Nova Lite, an expert multimodal AI assistant. I need you to parse receipt data from both the provided image (if available) and the extracted text data. 
+  let prompt = `You are an expert receipt data extraction AI. Analyze this receipt data and extract structured information.
 
-TASK: Extract receipt information and return ONLY a JSON object with this exact structure:
+TEXTRACT STRUCTURED DATA:
+Summary Fields: ${JSON.stringify(summaryFields, null, 2)}
+Line Items: ${JSON.stringify(lineItems, null, 2)}
 
+RAW TEXT:
+${rawText}
+
+Please extract and return ONLY a valid JSON object with this exact structure:
 {
   "merchant": "store name",
-  "date": "MM/DD/YYYY format",
-  "total": "XX.XX",
-  "subtotal": "XX.XX or null",
-  "tax": "XX.XX or null",
+  "vendor": "store name (same as merchant)",
+  "date": "YYYY-MM-DD format",
+  "total": "X.XX (final total amount)",
+  "subtotal": "X.XX (before tax)",
+  "tax": "X.XX (tax amount)",
   "items": [
     {
-      "name": "item name",
-      "quantity": 1,
-      "price": "XX.XX",
-      "lineTotal": "XX.XX"
+      "name": "item description",
+      "price": "X.XX",
+      "quantity": "1"
     }
   ]
 }
 
-AVAILABLE DATA:
+IMPORTANT RULES:
+1. Return ONLY valid JSON, no extra text
+2. Use the most accurate data from Textract structured fields when available
+3. For missing data, use reasonable defaults or "Unknown"/"0.00"
+4. Ensure all prices are in X.XX format
+5. Extract individual items with their prices when possible
+6. If you can see the receipt image, use visual information to improve accuracy
 
-AWS Textract Structured Data:`;
-
-  // Add Textract summary fields
-  if (Object.keys(summaryFields).length > 0) {
-    prompt += `\nSummary Fields:\n`;
-    for (const [key, value] of Object.entries(summaryFields)) {
-      prompt += `- ${key}: ${value.value} (confidence: ${value.confidence}%)\n`;
-    }
-  }
-
-  // Add Textract line items
-  if (lineItems.length > 0) {
-    prompt += `\nLine Items:\n`;
-    lineItems.forEach((item, index) => {
-      prompt += `Item ${index + 1}:\n`;
-      for (const [key, value] of Object.entries(item)) {
-        prompt += `  - ${key}: ${value.value} (confidence: ${value.confidence}%)\n`;
-      }
-    });
-  }
-
-  prompt += `\nRaw Text Extracted:
-${rawText}
-
-PARSING INSTRUCTIONS:
-1. If an image is provided, use your vision capabilities to verify and enhance the extracted data
-2. Prioritize high-confidence Textract structured data
-3. Use raw text parsing for missing or low-confidence fields
-4. For merchant: Look for business name (usually at top of receipt)
-5. For date: Convert any date format to MM/DD/YYYY
-6. For items: Extract product names, quantities (default 1), prices, and line totals
-7. For prices: Use XX.XX format without currency symbols
-8. Use null for optional fields if not found, "Unknown" for required fields if not found
-
-IMPORTANT: Return ONLY the JSON object. No explanations, no markdown formatting, no additional text.
-
-JSON:`;
+Extract the data now:`;
 
   return prompt;
 }
 
 function createFallbackData(textractResult) {
-  const fallback = {
-    merchant: "Unknown Vendor",
-    date: formatTodayDate(),
-    total: "0.00",
-    subtotal: null,
-    tax: null,
+  const { summaryFields, lineItems } = textractResult;
+  
+  // Try to extract basic info from Textract data
+  const fallbackData = {
+    merchant: summaryFields?.vendor || summaryFields?.name || 'Unknown Store',
+    vendor: summaryFields?.vendor || summaryFields?.name || 'Unknown Store',
+    date: summaryFields?.date || formatTodayDate(),
+    total: summaryFields?.total || '0.00',
+    subtotal: summaryFields?.subtotal || '0.00',
+    tax: summaryFields?.tax || '0.00',
     items: []
   };
 
-  if (!textractResult) {
-    return fallback;
-  }
-
-  // Try to extract from Textract summary fields
-  const { summaryFields } = textractResult;
-  
-  if (summaryFields) {
-    if (summaryFields.VENDOR_NAME) {
-      fallback.merchant = summaryFields.VENDOR_NAME.value;
-    }
-    if (summaryFields.INVOICE_RECEIPT_DATE) {
-      fallback.date = summaryFields.INVOICE_RECEIPT_DATE.value;
-    }
-    if (summaryFields.TOTAL) {
-      fallback.total = summaryFields.TOTAL.value.replace(/[^0-9.]/g, '');
-    }
-    if (summaryFields.SUBTOTAL) {
-      fallback.subtotal = summaryFields.SUBTOTAL.value.replace(/[^0-9.]/g, '');
-    }
-    if (summaryFields.TAX) {
-      fallback.tax = summaryFields.TAX.value.replace(/[^0-9.]/g, '');
-    }
-  }
-
-  // Try to extract items from Textract line items
-  const { lineItems } = textractResult;
+  // Try to extract items from line items
   if (lineItems && lineItems.length > 0) {
-    fallback.items = lineItems.map((item, index) => {
-      return {
-        name: item.ITEM?.value || `Item ${index + 1}`,
-        quantity: parseInt(item.QUANTITY?.value) || 1,
-        price: item.PRICE?.value?.replace(/[^0-9.]/g, '') || "0.00",
-        lineTotal: item.PRICE?.value?.replace(/[^0-9.]/g, '') || "0.00"
-      };
-    });
+    fallbackData.items = lineItems.map(item => ({
+      name: item.item || item.description || 'Unknown Item',
+      price: item.price || item.amount || '0.00',
+      quantity: item.quantity || '1'
+    }));
   }
 
-  return fallback;
+  return fallbackData;
 }
 
 function enhanceParsedData(parsedData, textractResult) {
-  // Add confidence scores and validation
-  const enhanced = { ...parsedData };
-  
-  // Ensure required fields have values
-  if (!enhanced.merchant || enhanced.merchant === "") {
-    enhanced.merchant = "Unknown Vendor";
+  // Clean and validate the parsed data
+  if (parsedData.total) {
+    parsedData.total = cleanPrice(parsedData.total);
   }
   
-  if (!enhanced.date || enhanced.date === "") {
-    enhanced.date = formatTodayDate();
+  if (parsedData.subtotal) {
+    parsedData.subtotal = cleanPrice(parsedData.subtotal);
   }
   
-  if (!enhanced.total || enhanced.total === "") {
-    enhanced.total = "0.00";
+  if (parsedData.tax) {
+    parsedData.tax = cleanPrice(parsedData.tax);
   }
 
-  // Ensure items is an array
-  if (!Array.isArray(enhanced.items)) {
-    enhanced.items = [];
+  // Clean item prices
+  if (parsedData.items && Array.isArray(parsedData.items)) {
+    parsedData.items = parsedData.items.map(item => ({
+      ...item,
+      price: cleanPrice(item.price || '0.00'),
+      quantity: item.quantity || '1'
+    }));
   }
-
-  // Clean up item data
-  enhanced.items = enhanced.items.map(item => ({
-    name: item.name || "Unknown Item",
-    quantity: parseInt(item.quantity) || 1,
-    price: cleanPrice(item.price),
-    lineTotal: cleanPrice(item.lineTotal || item.price)
-  }));
 
   // Add metadata
-  enhanced.metadata = {
+  parsedData.metadata = {
     processedBy: 'bedrock-nova-lite',
-    textractFieldsFound: Object.keys(textractResult.summaryFields || {}).length,
-    textractItemsFound: (textractResult.lineItems || []).length,
-    confidence: calculateOverallConfidence(enhanced, textractResult)
+    processingTimestamp: new Date().toISOString(),
+    textractFieldsUsed: Object.keys(textractResult.summaryFields || {}).length,
+    lineItemsFound: (textractResult.lineItems || []).length,
+    confidence: 0.85 // Will be calculated separately
   };
 
-  return enhanced;
+  return parsedData;
 }
 
 function cleanPrice(price) {
-  if (!price) return "0.00";
+  if (!price) return '0.00';
   
-  // Remove currency symbols and extract number
-  const cleaned = price.toString().replace(/[^0-9.]/g, '');
-  const number = parseFloat(cleaned);
+  // Remove currency symbols and extra spaces
+  const cleaned = price.toString().replace(/[$£€¥,\s]/g, '');
   
-  if (isNaN(number)) return "0.00";
+  // Extract number
+  const match = cleaned.match(/\d+\.?\d*/);
+  if (match) {
+    const num = parseFloat(match[0]);
+    return num.toFixed(2);
+  }
   
-  return number.toFixed(2);
+  return '0.00';
 }
 
 function calculateOverallConfidence(parsedData, textractResult) {
-  let score = 0;
-  let maxScore = 5;
+  let confidence = 0.5; // Base confidence
   
-  // Merchant confidence
-  if (parsedData.merchant && parsedData.merchant !== "Unknown Vendor") {
-    score += 1;
+  // Boost confidence based on data quality
+  if (parsedData.merchant && parsedData.merchant !== 'Unknown Store') confidence += 0.2;
+  if (parsedData.total && parseFloat(parsedData.total) > 0) confidence += 0.15;
+  if (parsedData.items && parsedData.items.length > 0) confidence += 0.1;
+  if (parsedData.date && parsedData.date !== formatTodayDate()) confidence += 0.05;
+  
+  // Factor in Textract confidence
+  if (textractResult.confidence && textractResult.confidence.overall) {
+    confidence = (confidence + textractResult.confidence.overall / 100) / 2;
   }
   
-  // Date confidence
-  if (parsedData.date && parsedData.date !== formatTodayDate()) {
-    score += 1;
-  }
-  
-  // Total confidence
-  if (parsedData.total && parseFloat(parsedData.total) > 0) {
-    score += 1;
-  }
-  
-  // Items confidence
-  if (parsedData.items && parsedData.items.length > 0) {
-    score += 1;
-  }
-  
-  // Textract data availability
-  if (textractResult.summaryFields && Object.keys(textractResult.summaryFields).length > 0) {
-    score += 1;
-  }
-  
-  return Math.round((score / maxScore) * 100);
+  return Math.min(confidence, 1.0);
 }
 
 function formatTodayDate() {
-  const today = new Date();
-  return `${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getDate().toString().padStart(2, '0')}/${today.getFullYear()}`;
+  return new Date().toISOString().split('T')[0];
 }
