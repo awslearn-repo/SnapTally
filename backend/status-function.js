@@ -1,5 +1,5 @@
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, GetCommand } = require("@aws-sdk/lib-dynamodb");
+const { DynamoDBDocumentClient, QueryCommand } = require("@aws-sdk/lib-dynamodb");
 const { SFNClient, DescribeExecutionCommand } = require("@aws-sdk/client-sfn");
 
 // Initialize AWS clients
@@ -42,29 +42,58 @@ exports.handler = async (event) => {
 
     console.log(`Checking status for receipt: ${receiptId}`);
 
-    // First, try to get the completed result from DynamoDB
+    // First, try to get the completed result from DynamoDB using Query (not Get)
     try {
-      const getCommand = new GetCommand({
+      console.log(`Querying DynamoDB for receiptId: ${receiptId}`);
+      
+      const queryCommand = new QueryCommand({
         TableName: RECEIPTS_TABLE,
-        Key: {
-          receiptId: receiptId,
-          timestamp: event.queryStringParameters?.timestamp
-        }
+        KeyConditionExpression: 'receiptId = :receiptId',
+        ExpressionAttributeValues: {
+          ':receiptId': receiptId
+        },
+        ScanIndexForward: false, // Get most recent first
+        Limit: 1
       });
 
-      const dynamoResult = await docClient.send(getCommand);
+      const dynamoResult = await docClient.send(queryCommand);
       
-      if (dynamoResult.Item) {
-        console.log(`Found completed receipt in DynamoDB: ${receiptId}`);
+      if (dynamoResult.Items && dynamoResult.Items.length > 0) {
+        const item = dynamoResult.Items[0];
+        console.log(`✅ Found completed receipt in DynamoDB: ${receiptId}`);
+        console.log(`   - Vendor: ${item.vendor}`);
+        console.log(`   - Total: $${item.totalFormatted || item.total}`);
+        console.log(`   - Items: ${item.itemCount || 0}`);
         
-        // Transform DynamoDB item to API response format
+        // Transform DynamoDB item to API response format with COMPLETE data
         const receiptData = {
-          vendor: dynamoResult.Item.vendor,
-          date: dynamoResult.Item.date,
-          total: dynamoResult.Item.total,
-          subtotal: dynamoResult.Item.subtotal,
-          tax: dynamoResult.Item.tax,
-          items: dynamoResult.Item.items || []
+          vendor: item.vendor || item.merchant,
+          merchant: item.vendor || item.merchant,
+          date: item.date,
+          total: item.totalFormatted || item.total,
+          subtotal: item.subtotalFormatted || item.subtotal,
+          tax: item.taxFormatted || item.tax,
+          items: (item.items || []).map(dbItem => ({
+            name: dbItem.name,
+            price: dbItem.priceFormatted || dbItem.price,
+            quantity: dbItem.quantityFormatted || dbItem.quantity,
+            lineTotal: dbItem.lineTotalFormatted || dbItem.lineTotal
+          })),
+          itemCount: item.itemCount || 0,
+          totalItems: item.totalItems || 0,
+          confidence: item.confidence || 0.85,
+          category: item.category || 'Other'
+        };
+
+        const responseMetadata = {
+          receiptId: item.receiptId,
+          timestamp: item.timestamp,
+          processingMethod: item.processingMethod || 'textract-bedrock-nova',
+          confidence: Math.round((item.confidence || 0.85) * 100),
+          category: item.category || 'Other',
+          s3Location: item.s3Location || '',
+          isValid: item.isValid !== false,
+          hasItems: (item.items || []).length > 0
         };
 
         return {
@@ -79,104 +108,114 @@ exports.handler = async (event) => {
             success: true,
             receiptId,
             status: 'COMPLETED',
+            message: 'Receipt processing completed',
             data: receiptData,
-            metadata: {
-              confidence: dynamoResult.Item.confidence,
-              category: dynamoResult.Item.category,
-              itemCount: dynamoResult.Item.itemCount,
-              processingMethod: dynamoResult.Item.processingMethod,
-              timestamp: dynamoResult.Item.timestamp
-            }
+            metadata: responseMetadata
           })
         };
+      } else {
+        console.log(`❌ No completed receipt found in DynamoDB for: ${receiptId}`);
       }
+
     } catch (dynamoError) {
-      console.log('Receipt not found in DynamoDB yet, checking Step Function status');
+      console.error('❌ DynamoDB query error:', dynamoError);
     }
 
-    // If not in DynamoDB, check Step Function execution status
+    // If not found in DynamoDB, check Step Function execution status
     if (executionArn) {
       try {
+        console.log(`Checking Step Function execution: ${executionArn}`);
+        
         const describeCommand = new DescribeExecutionCommand({
           executionArn: executionArn
         });
 
         const executionResult = await sfnClient.send(describeCommand);
-        
         console.log(`Step Function status: ${executionResult.status}`);
 
-        let status = 'PROCESSING';
-        let message = 'Receipt is being processed';
-
-        switch (executionResult.status) {
-          case 'RUNNING':
-            status = 'PROCESSING';
-            message = 'Receipt processing in progress';
-            break;
-          case 'SUCCEEDED':
-            status = 'COMPLETED';
-            message = 'Receipt processing completed';
-            break;
-          case 'FAILED':
-            status = 'FAILED';
-            message = 'Receipt processing failed';
-            break;
-          case 'TIMED_OUT':
-            status = 'FAILED';
-            message = 'Receipt processing timed out';
-            break;
-          case 'ABORTED':
-            status = 'FAILED';
-            message = 'Receipt processing was aborted';
-            break;
-        }
-
-        // If execution succeeded but we don't have DynamoDB data, 
-        // try to parse the execution output
-        let data = null;
-        if (executionResult.status === 'SUCCEEDED' && executionResult.output) {
+        if (executionResult.status === 'SUCCEEDED') {
+          // Parse the output to get the final result
+          let finalOutput = null;
           try {
-            const output = JSON.parse(executionResult.output);
-            if (output.parsedData) {
-              data = {
-                vendor: output.parsedData.merchant || output.parsedData.vendor,
-                date: output.parsedData.date,
-                total: output.parsedData.total,
-                subtotal: output.parsedData.subtotal,
-                tax: output.parsedData.tax,
-                items: output.parsedData.items || []
-              };
+            if (executionResult.output) {
+              finalOutput = JSON.parse(executionResult.output);
+              console.log('Step Function completed with output:', JSON.stringify(finalOutput, null, 2));
             }
           } catch (parseError) {
-            console.error('Error parsing execution output:', parseError);
+            console.error('Failed to parse Step Function output:', parseError);
           }
+
+          return {
+            statusCode: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*",
+              "Access-Control-Allow-Headers": "Content-Type",
+              "Access-Control-Allow-Methods": "GET, OPTIONS"
+            },
+            body: JSON.stringify({
+              success: true,
+              receiptId,
+              status: 'COMPLETED',
+              message: 'Receipt processing completed',
+              data: finalOutput?.savedData || null,
+              metadata: {
+                executionArn: executionArn,
+                stepFunctionStatus: executionResult.status,
+                processingMethod: 'step-function-completed'
+              }
+            })
+          };
+
+        } else if (executionResult.status === 'FAILED') {
+          return {
+            statusCode: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*",
+              "Access-Control-Allow-Headers": "Content-Type",
+              "Access-Control-Allow-Methods": "GET, OPTIONS"
+            },
+            body: JSON.stringify({
+              success: false,
+              receiptId,
+              status: 'FAILED',
+              message: 'Receipt processing failed',
+              error: executionResult.cause || 'Step Function execution failed',
+              data: null
+            })
+          };
+
+        } else {
+          // Still processing
+          return {
+            statusCode: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*",
+              "Access-Control-Allow-Headers": "Content-Type",
+              "Access-Control-Allow-Methods": "GET, OPTIONS"
+            },
+            body: JSON.stringify({
+              success: true,
+              receiptId,
+              status: 'PROCESSING',
+              message: 'Receipt processing in progress',
+              data: null,
+              metadata: {
+                executionArn: executionArn,
+                stepFunctionStatus: executionResult.status
+              }
+            })
+          };
         }
 
-        return {
-          statusCode: 200,
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "GET, OPTIONS"
-          },
-          body: JSON.stringify({
-            success: status !== 'FAILED',
-            receiptId,
-            status,
-            message,
-            data,
-            executionArn,
-            executionStatus: executionResult.status
-          })
-        };
-
-      } catch (sfnError) {
-        console.error('Error checking Step Function status:', sfnError);
+      } catch (stepFunctionError) {
+        console.error('❌ Step Function status check error:', stepFunctionError);
       }
     }
 
-    // Default response if we can't determine status
+    // Default response if no execution ARN provided and not found in DB
     return {
       statusCode: 200,
       headers: {
@@ -189,13 +228,14 @@ exports.handler = async (event) => {
         success: true,
         receiptId,
         status: 'PROCESSING',
-        message: 'Receipt processing in progress'
+        message: 'Receipt processing in progress',
+        data: null
       })
     };
 
   } catch (error) {
-    console.error('Error checking receipt status:', error);
-
+    console.error('❌ Status check error:', error);
+    
     return {
       statusCode: 500,
       headers: {
@@ -205,6 +245,7 @@ exports.handler = async (event) => {
         "Access-Control-Allow-Methods": "GET, OPTIONS"
       },
       body: JSON.stringify({
+        success: false,
         error: 'Failed to check receipt status',
         details: error.message
       })
