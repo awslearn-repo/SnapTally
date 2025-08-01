@@ -130,6 +130,9 @@ exports.handler = async (event) => {
     return {
       receiptId,
       parsedData: enhancedData,
+      textractResult, // Pass through for DynamoDB
+      s3Bucket, // Pass individual components
+      s3Key,
       s3Location: `s3://${s3Bucket}/${s3Key}`,
       status: 'BEDROCK_COMPLETED',
       timestamp: new Date().toISOString(),
